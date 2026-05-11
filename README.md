@@ -40,27 +40,9 @@ cd /path/to/gost-trier
 uv tool install .
 ```
 
-This installs `gost-trier`, `xray-trier`, and `xray-run` so they can be run without `uv run`:
-
-```sh
-xray-trier --timeout=5s 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -F=MAGIC_FILE_1
-```
+This installs `gost-trier`, `xray-trier`, and `xray-run`.
 
 `xray-run` and `xray-trier` auto-bootstrap native helpers when needed. They first use binaries already on `PATH`, then download cached release binaries for Xray and `Xray-Link-Json` under `~/.cache/gost-trier/bin/`. `Xray-Link-Json` falls back to `go install` only if the release download is not available. Advanced users can override these paths with `XRAY_BIN` and `XRAY_LINK_JSON`.
-
-Run the fastest result in tmux with SOCKS and HTTP listeners:
-
-```sh
-xray-trier --timeout=5s --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
-```
-
-If tmux is unavailable, `--run-in-tmux` falls back to managed detached processes and still prints the curl commands for testing the listeners. Reusing the same session name cleans up previously managed processes for that session before starting new ones, which helps free the old ports.
-
-Sample 100 configs from a larger subscription and stop early if a fast enough config is found:
-
-```sh
-xray-trier --timeout=5s --sample=100 --enough-delay-ms=200 --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
-```
 
 To upgrade later, `uv tool upgrade` uses `uv`'s recorded tool requirement:
 
@@ -81,4 +63,21 @@ cd /path/to/gost-trier
 uv tool install --reinstall .
 ```
 
-See [docs/usage.md](docs/usage.md) for CLI usage.
+## Usage
+
+The following will find the fastest config from the given URL https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt, and
+run it in tmux with the configured SOCKS and HTTP listeners:
+
+```sh
+xray-trier --timeout=5s --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
+```
+
+If tmux is unavailable, `--run-in-tmux` falls back to managed detached processes. Reusing the same session name cleans up previously managed processes for that session before starting new ones.
+
+Sample 100 configs from a larger subscription and stop early if a fast enough config is found:
+
+```sh
+xray-trier --timeout=5s --sample=100 --enough-delay-ms=200 --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
+```
+
+See [docs/usage.md](docs/usage.md) for more.
