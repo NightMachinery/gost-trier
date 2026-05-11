@@ -23,6 +23,16 @@ import httpx
 
 
 DEFAULT_TEST_URLS = ["https://api.ipify.org", "https://myip.wtf/json"]
+TRIER_EPILOG = """examples:
+  %(prog)s trojan.txt -- -F=MAGIC_FILE_1
+  %(prog)s --shuffle --timeout=5s --jobs=20 trojan.txt -- -L=socks5://127.0.0.1:1050 -F=MAGIC_FILE_1
+  %(prog)s https://example.com/sub.txt -- -F=MAGIC_FILE_1
+
+candidate sources:
+  FILE arguments may be local paths or http(s) URLs.
+  Plain text and base64 subscription text are supported.
+  Blank lines and lines starting with # are ignored.
+"""
 
 
 @dataclass(frozen=True)
@@ -60,14 +70,19 @@ def parse_trier_args(
     description: str,
     default_jobs: int = 1,
 ) -> TrierOptions:
-    parser = argparse.ArgumentParser(prog=prog, description=description)
-    parser.add_argument("files", nargs="+")
-    parser.add_argument("--test-url", action="append", dest="test_urls")
-    parser.add_argument("--shuffle", action="store_true")
-    parser.add_argument("--timeout", type=parse_duration, default=20.0)
-    parser.add_argument("--jobs", type=int, default=default_jobs)
-    parser.add_argument("--run-in-tmux")
-    parser.add_argument("--run-top", type=int, default=1)
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description=description,
+        epilog=TRIER_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("files", nargs="+", metavar="FILE_OR_URL", help="candidate list source for MAGIC_FILE_N")
+    parser.add_argument("--test-url", action="append", dest="test_urls", help="URL to test through the proxy; repeatable")
+    parser.add_argument("--shuffle", action="store_true", help="shuffle each candidate source before testing")
+    parser.add_argument("--timeout", type=parse_duration, default=20.0, help="per-URL timeout, e.g. 500ms, 5s, 1m")
+    parser.add_argument("--jobs", type=int, default=default_jobs, help=f"parallel configs to test (default: {default_jobs})")
+    parser.add_argument("--run-in-tmux", metavar="SESSION", help="launch the fastest working configs in this tmux session")
+    parser.add_argument("--run-top", type=int, default=1, help="number of working configs to launch with --run-in-tmux")
 
     if "--" not in argv:
         parser.parse_args(argv)

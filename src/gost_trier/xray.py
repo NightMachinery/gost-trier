@@ -355,11 +355,43 @@ def run_xray_in_tmux(session: str, results: Sequence[dict[str, Any]], run_top: i
 
 
 def xray_run_main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="xray-run", description="Generate or run Xray config from gost-like args.")
-    parser.add_argument("mode", choices=["json", "exec"])
-    parser.add_argument("args", nargs=argparse.REMAINDER)
-    namespace = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    runner_args = list(namespace.args)
+    parser = argparse.ArgumentParser(
+        prog="xray-run",
+        description="Generate or run Xray config from a gost-like -L/-F interface.",
+        epilog="""listener examples:
+  -L=socks5://127.0.0.1:1060
+  -L=http://user:password@:2060
+
+forward examples:
+  -F='vless://...'
+  -F=direct://
+
+If no -L is provided, a free local socks listener is selected.
+If no -F is provided, direct:// is used.
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="mode", metavar="{json,exec}", required=True)
+    add_xray_run_subparser(
+        subparsers,
+        "json",
+        "print generated Xray JSON config to stdout",
+        """examples:
+  xray-run json -L=socks5://127.0.0.1:1060 -F='vless://...'
+  xray-run json -L=http://user:password@:2060
+""",
+    )
+    add_xray_run_subparser(
+        subparsers,
+        "exec",
+        "write config to a temp file and exec xray run -c",
+        """examples:
+  xray-run exec -F='vless://...'
+  xray-run exec -L=socks5://127.0.0.1:1060 -L=http://user:password@:2060 -F='vless://...'
+""",
+    )
+    namespace, runner_args = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
+    runner_args = list(runner_args)
     if runner_args and runner_args[0] == "--":
         runner_args = runner_args[1:]
     try:
@@ -375,3 +407,19 @@ def xray_run_main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:
         print(f"xray-run: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+
+
+def add_xray_run_subparser(
+    subparsers: argparse._SubParsersAction,
+    name: str,
+    help_text: str,
+    epilog: str,
+) -> None:
+    subparser = subparsers.add_parser(
+        name,
+        usage=f"xray-run {name} [ARGS ...]",
+        help=help_text,
+        description=help_text,
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
