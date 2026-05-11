@@ -67,6 +67,8 @@ Xray share links are converted with `Xray-Link-Json`. Discovery order is:
 
 For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order.
 
+If no `-F` is provided to `xray-run`, it uses a direct connection (`direct://` / Xray `freedom` outbound).
+
 `xray-trier` defaults to `--jobs=50`; `gost-trier` defaults to `--jobs=1`. Both commands default to trying `https://api.ipify.org` first, then `https://myip.wtf/json`.
 
 To launch the fastest working configs in tmux after testing:

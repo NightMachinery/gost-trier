@@ -198,6 +198,14 @@ def test_parse_xray_args_auto_listen(monkeypatch):
     assert parsed.listens[0].port == 34567
 
 
+def test_parse_xray_args_defaults_to_direct_forward(monkeypatch):
+    monkeypatch.setattr("gost_trier.xray.free_port", lambda: 34567)
+
+    parsed = parse_xray_args(["-L=socks5://127.0.0.1:1050"])
+
+    assert parsed.forwards == ["direct://"]
+
+
 def test_listener_curl_command_uses_socks5h():
     command = listener_curl_command(parse_listen("socks5://127.0.0.1:1050"))
 

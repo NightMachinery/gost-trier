@@ -70,7 +70,7 @@ def parse_xray_args(args: Sequence[str], *, auto_listen: bool = True) -> XrayArg
         listens.append(Listen(host="127.0.0.1", port=free_port(), scheme="socks5"))
         print(f"xray-run: auto-selected -L=socks5://127.0.0.1:{listens[0].port}", file=sys.stderr)
     if not forwards:
-        raise ValueError("at least one -F forward is required")
+        forwards.append("direct://")
     return XrayArgs(listens=listens, forwards=forwards)
 
 
