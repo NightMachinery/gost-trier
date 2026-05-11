@@ -333,6 +333,7 @@ def run_trier(
             except Exception as exc:
                 print(f"[{index}/{total}] skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
                 continue
+            print(progress_message(index, total, result), file=sys.stderr)
             if result is not None:
                 results.append(result)
                 if is_enough_result(result, options.enough_delay_ms):
@@ -369,12 +370,13 @@ def run_parallel_tests(
         while future_to_index:
             for future in as_completed(future_to_index):
                 index = future_to_index.pop(future)
-                print(f"[{index}/{total}] tested", file=sys.stderr)
                 try:
                     result = future.result()
                 except Exception as exc:
                     print(f"[{index}/{total}] skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
                     result = None
+                else:
+                    print(progress_message(index, total, result), file=sys.stderr)
                 if result is not None:
                     results.append(result)
                     if is_enough_result(result, options.enough_delay_ms):
@@ -398,3 +400,9 @@ def run_parallel_tests(
 
 def is_enough_result(result: dict[str, Any], enough_delay_ms: float | None) -> bool:
     return enough_delay_ms is not None and result["best-delay-ms"] <= enough_delay_ms
+
+
+def progress_message(index: int, total: int, result: dict[str, Any] | None) -> str:
+    if result is None:
+        return f"[{index}/{total}] fail"
+    return f"[{index}/{total}] success {result['best-delay-ms']} ms"

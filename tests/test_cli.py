@@ -13,6 +13,7 @@ from gost_trier.common import (
     is_http_url,
     parse_duration,
     parse_trier_args,
+    progress_message,
     run_trier,
     sample_iterable,
 )
@@ -208,6 +209,11 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
 
     assert calls == [["a"]]
     assert '"best-delay-ms": 100' in capsys.readouterr().out
+
+
+def test_progress_message_prints_success_or_failure_and_delay():
+    assert progress_message(1, 3, None) == "[1/3] fail"
+    assert progress_message(2, 3, {"best-delay-ms": 123}) == "[2/3] success 123 ms"
 
 
 def test_tmux_command_quotes_config():
