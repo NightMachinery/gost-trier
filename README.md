@@ -4,6 +4,12 @@
 
 ## Install
 
+Install uv if needed:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 Install the commands locally with uv:
 
 ```sh
@@ -21,6 +27,12 @@ This installs `gost-trier`, `xray-trier`, and `xray-run` so they can be run with
 
 ```sh
 xray-trier --timeout=5s 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -F=MAGIC_FILE_1
+```
+
+Run the fastest result in tmux with SOCKS and HTTP listeners:
+
+```sh
+xray-trier --timeout=5s --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
 ```
 
 To upgrade later, `uv tool upgrade` uses uv's recorded tool requirement:
