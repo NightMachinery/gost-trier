@@ -11,6 +11,8 @@ dependencies = [
 
 [project.scripts]
 gost-trier = "gost_trier.cli:main"
+xray-run = "gost_trier.xray:xray_run_main"
+xray-trier = "gost_trier.xray_trier:main"
 
 [dependency-groups]
 dev = [
