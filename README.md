@@ -23,10 +23,23 @@ This installs `gost-trier`, `xray-trier`, and `xray-run` so they can be run with
 xray-trier --timeout=5s 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -F=MAGIC_FILE_1
 ```
 
-To upgrade later:
+To upgrade later, `uv tool upgrade` uses uv's recorded tool requirement:
 
 ```sh
 uv tool upgrade gost-trier
+```
+
+For a GitHub install, this should update from the Git source. If you want to force a fresh reinstall from GitHub, use:
+
+```sh
+uv tool install --reinstall git+https://github.com/NightMachinery/gost-trier.git
+```
+
+For a local checkout install, rerun the local install command from the checkout after pulling or editing:
+
+```sh
+cd /path/to/gost-trier
+uv tool install --reinstall .
 ```
 
 See [docs/usage.md](docs/usage.md) for CLI usage.
