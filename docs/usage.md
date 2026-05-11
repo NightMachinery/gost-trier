@@ -52,10 +52,10 @@ uv run xray-trier --timeout=20s trojan.txt -- -L=socks5://127.0.0.1:1050 -F=MAGI
 xray run -c <temp-file>
 ```
 
-The `xray-run` interface accepts the same `-L` and `-F` shapes used in the examples above. If `-L` is omitted, it picks a free local socks port and logs it to stderr. Xray listeners may be `socks5://`, `socks5h://`, `socks://`, or `http://`; listener username/password auth is supported for HTTP and SOCKS. A missing listener host defaults to `0.0.0.0`, for example:
+The `xray-run` interface accepts the same `-L` and `-F` shapes used in the examples above. If `-L` is omitted, it picks a free local socks port and logs it to stderr. Multiple `-L` listeners are supported. Xray listeners may be `socks5://`, `socks5h://`, `socks://`, or `http://`; listener username/password auth is supported for HTTP and SOCKS. A missing listener host defaults to `0.0.0.0`, for example:
 
 ```sh
-xray-run exec -L='http://user:password@:2060' -F='vless://...'
+xray-run exec -L=socks5://127.0.0.1:1060 -L='http://user:password@:2060' -F='vless://...'
 ```
 
 Xray share links are converted with `Xray-Link-Json`. Discovery order is:

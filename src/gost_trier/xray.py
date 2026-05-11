@@ -71,8 +71,6 @@ def parse_xray_args(args: Sequence[str], *, auto_listen: bool = True) -> XrayArg
         print(f"xray-run: auto-selected -L=socks5://127.0.0.1:{listens[0].port}", file=sys.stderr)
     if not forwards:
         raise ValueError("at least one -F forward is required")
-    if len(listens) != 1:
-        raise ValueError("xray-run supports exactly one -L listener")
     return XrayArgs(listens=listens, forwards=forwards)
 
 
@@ -179,7 +177,6 @@ def normalize_outbound(outbound: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_xray_config(args: XrayArgs, *, converter: Sequence[str] | None = None) -> dict[str, Any]:
-    listen = args.listens[0]
     outbounds: list[dict[str, Any]] = []
     if len(args.forwards) == 1:
         converted = [convert_link_to_outbounds(args.forwards[0], converter=converter)]
@@ -200,16 +197,28 @@ def build_xray_config(args: XrayArgs, *, converter: Sequence[str] | None = None)
 
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [build_inbound(listen)],
+        "inbounds": [build_inbound(listen, index) for index, listen in enumerate(args.listens, start=1)],
         "outbounds": outbounds,
-        "routing": {"rules": [{"type": "field", "inboundTag": ["socks-in"], "outboundTag": "proxy-1"}]},
+        "routing": {
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": [inbound_tag(index) for index in range(1, len(args.listens) + 1)],
+                    "outboundTag": "proxy-1",
+                }
+            ]
+        },
     }
 
 
-def build_inbound(listen: Listen) -> dict[str, Any]:
+def inbound_tag(index: int) -> str:
+    return f"in-{index}"
+
+
+def build_inbound(listen: Listen, index: int = 1) -> dict[str, Any]:
     protocol = "http" if listen.scheme == "http" else "socks"
     inbound = {
-        "tag": "socks-in",
+        "tag": inbound_tag(index),
         "listen": listen.host,
         "port": listen.port,
         "protocol": protocol,

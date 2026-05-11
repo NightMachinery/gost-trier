@@ -162,6 +162,15 @@ def test_parse_xray_args_accepts_gost_like_flags():
     assert parsed.forwards == ["first", "second"]
 
 
+def test_parse_xray_args_accepts_multiple_listeners():
+    parsed = parse_xray_args(["-L=socks5://127.0.0.1:1060", "-L=http://user:password@:2060", "-F=first"])
+
+    assert parsed.listens == [
+        parse_listen("socks5://127.0.0.1:1060"),
+        parse_listen("http://user:password@:2060"),
+    ]
+
+
 def test_parse_listen_defaults_missing_host_to_all_interfaces():
     parsed = parse_listen("http://user:password@:2060")
 
@@ -252,6 +261,26 @@ def test_build_xray_config_chains_outbounds(monkeypatch):
     assert config["outbounds"][1]["tag"] == "proxy-2"
     assert "proxySettings" not in config["outbounds"][1]
     assert "sendThrough" not in config["outbounds"][0]
+
+
+def test_build_xray_config_creates_multiple_inbounds(monkeypatch):
+    def fake_convert(link, converter=None):
+        return [{"protocol": "freedom", "settings": {"link": link}}]
+
+    monkeypatch.setattr("gost_trier.xray.convert_link_to_outbounds", fake_convert)
+    args = XrayArgs(
+        listens=[
+            parse_listen("socks5://127.0.0.1:1060"),
+            parse_listen("http://user:password@:2060"),
+        ],
+        forwards=["first"],
+    )
+
+    config = build_xray_config(args)
+
+    assert [inbound["tag"] for inbound in config["inbounds"]] == ["in-1", "in-2"]
+    assert [inbound["protocol"] for inbound in config["inbounds"]] == ["socks", "http"]
+    assert config["routing"]["rules"][0]["inboundTag"] == ["in-1", "in-2"]
 
 
 def test_xray_tmux_command_uses_xray_run_exec():
