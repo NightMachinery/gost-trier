@@ -19,6 +19,8 @@ from urllib.parse import quote, unquote, urlparse
 
 from .common import free_port, is_successful_test, test_url, wait_for_port
 from .gost import ensure_tmux_session, strip_listen_args
+from .native import locate_xray, locate_xray_link_json
+from .sessions import run_managed_session
 
 
 DEFAULT_CONVERTER_CLONE = Path.home() / ".base" / "Xray-Link-Json"
@@ -96,6 +98,10 @@ def locate_converter() -> list[str]:
     path_binary = shutil.which("Xray-Link-Json")
     if path_binary:
         return [path_binary]
+    try:
+        return [str(locate_xray_link_json())]
+    except Exception as release_exc:
+        print(f"xray-run: release install for Xray-Link-Json failed: {release_exc}", file=sys.stderr)
     install_converter()
     path_binary = shutil.which("Xray-Link-Json")
     if path_binary:
@@ -117,6 +123,10 @@ def locate_converter() -> list[str]:
 
 
 def install_converter() -> None:
+    if not shutil.which("go"):
+        raise FileNotFoundError(
+            "Xray-Link-Json was not found and automatic release download failed; install Go or set XRAY_LINK_JSON"
+        )
     print("xray-run: installing Xray-Link-Json with go install", file=sys.stderr)
     subprocess.run(
         ["go", "install", "github.com/NightMachinery/Xray-Link-Json@latest"],
@@ -243,11 +253,12 @@ def inbound_settings(listen: Listen) -> dict[str, Any]:
 
 
 def validate_xray_config(config: dict[str, Any]) -> None:
+    xray_bin = str(locate_xray())
     with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="xray-run-test-", delete=True) as file:
         json.dump(config, file)
         file.flush()
         completed = subprocess.run(
-            ["xray", "run", "-test", "-c", file.name],
+            [xray_bin, "run", "-test", "-c", file.name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -265,6 +276,7 @@ def xray_run_json(args: Sequence[str], *, validate: bool = True) -> dict[str, An
 
 
 def exec_xray(args: Sequence[str]) -> None:
+    xray_bin = str(locate_xray())
     parsed = parse_xray_args(args)
     config = build_xray_config(parsed)
     validate_xray_config(config)
@@ -272,7 +284,7 @@ def exec_xray(args: Sequence[str]) -> None:
     temp = tempfile.NamedTemporaryFile("w", suffix=".json", prefix="xray-run-", delete=False)
     with temp:
         json.dump(config, temp)
-    os.execvp("xray", ["xray", "run", "-c", temp.name])
+    os.execv(xray_bin, [xray_bin, "run", "-c", temp.name])
 
 
 def listener_curl_command(listen: Listen, url: str = "https://api.ipify.org") -> str:
@@ -298,6 +310,7 @@ def run_xray_test(config_args: Sequence[str], test_urls: Sequence[str], timeout:
     port = free_port()
     test_args = [f"-L=socks5://127.0.0.1:{port}", *strip_listen_args(config_args)]
     try:
+        xray_bin = str(locate_xray())
         config = xray_run_json(test_args, validate=False)
     except Exception:
         return None
@@ -305,7 +318,7 @@ def run_xray_test(config_args: Sequence[str], test_urls: Sequence[str], timeout:
     try:
         with temp:
             json.dump(config, temp)
-        proc = subprocess.Popen(["xray", "run", "-c", temp.name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen([xray_bin, "run", "-c", temp.name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             if proc.poll() is not None:
                 return None
@@ -346,20 +359,33 @@ def run_xray_in_tmux(session: str, results: Sequence[dict[str, Any]], run_top: i
     if not results:
         print("No working configs found; skipping tmux launch", file=sys.stderr)
         return
-    ensure_tmux_session(session)
     launched: list[list[str]] = []
     for index, result in enumerate(results[:run_top], start=1):
         config = list(result["config"])
         if not has_listen_args(config):
             config = [f"-L=socks5://127.0.0.1:{free_port()}", *config]
         launched.append(config)
+
+    try:
+        ensure_tmux_session(session)
+    except RuntimeError as exc:
+        print(f"tmux unavailable: {exc}", file=sys.stderr)
+        processes = [(["xray-run", "exec", *config], [listener_proxy_url(listen) for listen in parse_xray_args(config).listens]) for config in launched]
+        run_managed_session(session, processes)
+        print_xray_tmux_launch_info(session, launched, managed=True)
+        return
+
+    for index, config in enumerate(launched, start=1):
         subprocess.run(xray_tmux_command(session, f"xray-{index}", config), check=True)
     print_xray_tmux_launch_info(session, launched)
 
 
-def print_xray_tmux_launch_info(session: str, configs: Sequence[Sequence[str]]) -> None:
+def print_xray_tmux_launch_info(session: str, configs: Sequence[Sequence[str]], *, managed: bool = False) -> None:
     print(f"tmux session: {session}", file=sys.stderr)
-    print(f"attach: tmux attach -t {shlex.quote(session)}", file=sys.stderr)
+    if managed:
+        print("runner: managed detached processes (tmux unavailable)", file=sys.stderr)
+    else:
+        print(f"attach: tmux attach -t {shlex.quote(session)}", file=sys.stderr)
     for config in configs:
         parsed = parse_xray_args(config)
         for listen in parsed.listens:

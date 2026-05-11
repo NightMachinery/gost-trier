@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from .common import free_port, is_successful_test, test_url, wait_for_port
+from .sessions import run_managed_session
 
 
 def strip_listen_args(args: Sequence[str]) -> list[str]:
@@ -146,20 +147,33 @@ def run_gost_in_tmux(session: str, results: Sequence[dict[str, Any]], run_top: i
     if not results:
         print("No working configs found; skipping tmux launch", file=sys.stderr)
         return
-    ensure_tmux_session(session)
     launched: list[list[str]] = []
     for index, result in enumerate(results[:run_top], start=1):
         config = list(result["config"])
         if not has_listen_args(config):
             config = [f"-L=socks5://127.0.0.1:{free_port()}", *config]
         launched.append(config)
+
+    try:
+        ensure_tmux_session(session)
+    except RuntimeError as exc:
+        print(f"tmux unavailable: {exc}", file=sys.stderr)
+        processes = [(["gost", *config], listen_args(config)) for config in launched]
+        run_managed_session(session, processes)
+        print_tmux_launch_info(session, launched, command_name="gost", managed=True)
+        return
+
+    for index, config in enumerate(launched, start=1):
         subprocess.run(tmux_command(session, f"gost-{index}", config), check=True)
     print_tmux_launch_info(session, launched, command_name="gost")
 
 
-def print_tmux_launch_info(session: str, configs: Sequence[Sequence[str]], *, command_name: str) -> None:
+def print_tmux_launch_info(session: str, configs: Sequence[Sequence[str]], *, command_name: str, managed: bool = False) -> None:
     print(f"tmux session: {session}", file=sys.stderr)
-    print(f"attach: tmux attach -t {shlex.quote(session)}", file=sys.stderr)
+    if managed:
+        print("runner: managed detached processes (tmux unavailable)", file=sys.stderr)
+    else:
+        print(f"attach: tmux attach -t {shlex.quote(session)}", file=sys.stderr)
     for config in configs:
         for listen in listen_args(config):
             print(f"test {command_name}: {listener_curl_command(listen)}", file=sys.stderr)

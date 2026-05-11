@@ -21,6 +21,7 @@ from gost_trier.gost import (
     has_listen_args,
     listen_args,
     listener_curl_command as gost_listener_curl_command,
+    run_gost_in_tmux,
     strip_listen_args,
     tmux_command,
     tmux_install_commands,
@@ -37,7 +38,13 @@ from gost_trier.xray import (
     parse_converter_json,
     parse_xray_args,
     print_xray_tmux_launch_info,
+    run_xray_in_tmux,
     xray_tmux_command,
+)
+from gost_trier.native import (
+    executable_suffix,
+    xray_asset_name,
+    xray_link_json_asset_name,
 )
 
 
@@ -153,6 +160,23 @@ def test_gost_listener_curl_command_uses_listener_scheme():
     )
 
 
+def test_gost_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):
+    launched = []
+
+    def fake_run_managed_session(session, processes):
+        launched.append((session, processes))
+
+    monkeypatch.setattr("gost_trier.gost.ensure_tmux_session", lambda session: (_ for _ in ()).throw(RuntimeError("no tmux")))
+    monkeypatch.setattr("gost_trier.gost.run_managed_session", fake_run_managed_session)
+
+    run_gost_in_tmux("fallback", [{"best-delay-ms": 1, "config": ["-L=socks5://127.0.0.1:1080", "-F=x"]}], 1)
+
+    assert launched == [("fallback", [(["gost", "-L=socks5://127.0.0.1:1080", "-F=x"], ["socks5://127.0.0.1:1080"])])]
+    err = capsys.readouterr().err
+    assert "runner: managed detached processes" in err
+    assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
+
+
 def test_tmux_install_commands_include_windows_options(monkeypatch):
     monkeypatch.setattr("platform.system", lambda: "Windows")
 
@@ -161,6 +185,23 @@ def test_tmux_install_commands_include_windows_options(monkeypatch):
     assert any(command[0] == "scoop" for command in commands)
     assert any(command[0] == "choco" for command in commands)
     assert any(command[0] == "winget" for command in commands)
+
+
+def test_xray_link_json_asset_names():
+    assert xray_link_json_asset_name("v0.1.0", "linux", "amd64") == "Xray-Link-Json_v0.1.0_linux_amd64.tar.gz"
+    assert xray_link_json_asset_name("v0.1.0", "windows", "arm64") == "Xray-Link-Json_v0.1.0_windows_arm64.zip"
+
+
+def test_xray_asset_names():
+    assert xray_asset_name("v26.3.27", "linux", "amd64") == "Xray-linux-64.zip"
+    assert xray_asset_name("v26.3.27", "linux", "arm64") == "Xray-linux-arm64-v8a.zip"
+    assert xray_asset_name("v26.3.27", "darwin", "arm64") == "Xray-macos-arm64-v8a.zip"
+    assert xray_asset_name("v26.3.27", "windows", "amd64") == "Xray-windows-64.zip"
+
+
+def test_executable_suffix_uses_windows_extension():
+    assert executable_suffix("windows") == ".exe"
+    assert executable_suffix("linux") == ""
 
 
 def test_substitute_placeholders():
@@ -403,3 +444,25 @@ def test_print_xray_tmux_launch_info_includes_attach_and_curl(capsys):
     assert "attach: tmux attach -t xray-1080" in err
     assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
     assert "curl --proxy http://127.0.0.1:2080 https://api.ipify.org" in err
+
+
+def test_xray_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):
+    launched = []
+
+    def fake_run_managed_session(session, processes):
+        launched.append((session, processes))
+
+    monkeypatch.setattr("gost_trier.xray.ensure_tmux_session", lambda session: (_ for _ in ()).throw(RuntimeError("no tmux")))
+    monkeypatch.setattr("gost_trier.xray.run_managed_session", fake_run_managed_session)
+
+    run_xray_in_tmux("fallback", [{"best-delay-ms": 1, "config": ["-L=socks5://127.0.0.1:1080", "-F=direct://"]}], 1)
+
+    assert launched == [
+        (
+            "fallback",
+            [(["xray-run", "exec", "-L=socks5://127.0.0.1:1080", "-F=direct://"], ["socks5h://127.0.0.1:1080"])],
+        )
+    ]
+    err = capsys.readouterr().err
+    assert "runner: managed detached processes" in err
+    assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err

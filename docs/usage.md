@@ -62,8 +62,15 @@ Xray share links are converted with `Xray-Link-Json`. Discovery order is:
 
 1. `XRAY_LINK_JSON`
 2. `Xray-Link-Json` on `PATH`
-3. automatic `go install github.com/NightMachinery/Xray-Link-Json@latest`
-4. the local clone at `~/.base/Xray-Link-Json`
+3. cached or downloaded GitHub release binaries from `NightMachinery/Xray-Link-Json`
+4. automatic `go install github.com/NightMachinery/Xray-Link-Json@latest`
+5. the local clone at `~/.base/Xray-Link-Json`
+
+Xray itself is discovered in this order:
+
+1. `XRAY_BIN`
+2. `xray` on `PATH`
+3. cached or downloaded GitHub release binaries from `XTLS/Xray-core`
 
 For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order.
 
@@ -78,7 +85,7 @@ uv run gost-trier --run-in-tmux=gost --run-top=3 trojan.txt -- -L=socks5://127.0
 uv run xray-trier --run-in-tmux=xray --run-top=3 trojan.txt -- -L=socks5://127.0.0.1:1050 -F=MAGIC_FILE_1
 ```
 
-When `--run-in-tmux` is used, the command prints the tmux session name, an attach command, and curl commands for testing the launched listeners. If `tmux` is missing, it attempts a best-effort install using the available system package manager, including common Linux package managers, Homebrew on macOS, and Scoop/Chocolatey/Winget on Windows.
+When `--run-in-tmux` is used, the command prints the tmux session name, an attach command when tmux is available, and curl commands for testing the launched listeners. If `tmux` is missing, it attempts a best-effort install using the available system package manager, including common Linux package managers, Homebrew on macOS, and Scoop/Chocolatey/Winget on Windows. If tmux still is not available, it falls back to managed detached processes. Reusing the same session name cleans up previously managed processes for that session before launching new ones.
 
 Progress is written to stderr. The final stdout is a JSON array sorted by `best-delay-ms`:
 
