@@ -7,7 +7,7 @@
 Install uv if needed:
 
 ```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh
+curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_PRINT_VERBOSE=1 sh
 ```
 
 Install the commands locally with uv:
