@@ -4,16 +4,21 @@
 
 ## Install
 
-Install uv if needed:
+Install uv if needed; on Linux/macOS:
 
 ```sh
 curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_PRINT_VERBOSE=1 sh
 ```
 
+On Windows, you can install uv using Powershell:
+```
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
 Install the commands locally with uv:
 
 ```sh
-uv tool install git+https://github.com/NightMachinery/gost-trier.git
+uv tool install 'git+https://github.com/NightMachinery/gost-trier.git'
 ```
 
 From an existing local checkout:
