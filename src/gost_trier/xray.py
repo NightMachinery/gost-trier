@@ -347,11 +347,23 @@ def run_xray_in_tmux(session: str, results: Sequence[dict[str, Any]], run_top: i
         print("No working configs found; skipping tmux launch", file=sys.stderr)
         return
     ensure_tmux_session(session)
+    launched: list[list[str]] = []
     for index, result in enumerate(results[:run_top], start=1):
         config = list(result["config"])
         if not has_listen_args(config):
             config = [f"-L=socks5://127.0.0.1:{free_port()}", *config]
+        launched.append(config)
         subprocess.run(xray_tmux_command(session, f"xray-{index}", config), check=True)
+    print_xray_tmux_launch_info(session, launched)
+
+
+def print_xray_tmux_launch_info(session: str, configs: Sequence[Sequence[str]]) -> None:
+    print(f"tmux session: {session}", file=sys.stderr)
+    print(f"attach: tmux attach -t {shlex.quote(session)}", file=sys.stderr)
+    for config in configs:
+        parsed = parse_xray_args(config)
+        for listen in parsed.listens:
+            print(f"test xray: {listener_curl_command(listen)}", file=sys.stderr)
 
 
 def xray_run_main(argv: Sequence[str] | None = None) -> int:

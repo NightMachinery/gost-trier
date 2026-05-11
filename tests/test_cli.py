@@ -19,8 +19,11 @@ from gost_trier.common import (
 )
 from gost_trier.gost import (
     has_listen_args,
+    listen_args,
+    listener_curl_command as gost_listener_curl_command,
     strip_listen_args,
     tmux_command,
+    tmux_install_commands,
 )
 from gost_trier.placeholders import substitute_placeholders
 from gost_trier.xray import (
@@ -33,6 +36,7 @@ from gost_trier.xray import (
     parse_listen,
     parse_converter_json,
     parse_xray_args,
+    print_xray_tmux_launch_info,
     xray_tmux_command,
 )
 
@@ -133,6 +137,30 @@ def test_has_listen_args_detects_joined_and_split_forms():
     assert has_listen_args(["-F=x", "-L=socks5://a"])
     assert has_listen_args(["-F=x", "-L", "socks5://a"])
     assert not has_listen_args(["-F=x"])
+
+
+def test_listen_args_extracts_joined_and_split_forms():
+    assert listen_args(["-L=socks5://127.0.0.1:1080", "-L", "http://127.0.0.1:2080", "-F=x"]) == [
+        "socks5://127.0.0.1:1080",
+        "http://127.0.0.1:2080",
+    ]
+
+
+def test_gost_listener_curl_command_uses_listener_scheme():
+    assert (
+        gost_listener_curl_command("http://user:pass@:2080")
+        == "curl --proxy http://user:pass@127.0.0.1:2080 https://api.ipify.org"
+    )
+
+
+def test_tmux_install_commands_include_windows_options(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+
+    commands = tmux_install_commands()
+
+    assert any(command[0] == "scoop" for command in commands)
+    assert any(command[0] == "choco" for command in commands)
+    assert any(command[0] == "winget" for command in commands)
 
 
 def test_substitute_placeholders():
@@ -365,3 +393,13 @@ def test_xray_tmux_command_uses_xray_run_exec():
 
     assert command[:6] == ["tmux", "new-window", "-t", "sess", "-n", "xray-1"]
     assert command[6] == "xray-run exec -L=socks5://127.0.0.1:5000 '-F=a b'"
+
+
+def test_print_xray_tmux_launch_info_includes_attach_and_curl(capsys):
+    print_xray_tmux_launch_info("xray-1080", [["-L=socks5://127.0.0.1:1080", "-L=http://127.0.0.1:2080"]])
+
+    err = capsys.readouterr().err
+    assert "tmux session: xray-1080" in err
+    assert "attach: tmux attach -t xray-1080" in err
+    assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
+    assert "curl --proxy http://127.0.0.1:2080 https://api.ipify.org" in err

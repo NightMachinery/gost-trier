@@ -78,6 +78,8 @@ uv run gost-trier --run-in-tmux=gost --run-top=3 trojan.txt -- -L=socks5://127.0
 uv run xray-trier --run-in-tmux=xray --run-top=3 trojan.txt -- -L=socks5://127.0.0.1:1050 -F=MAGIC_FILE_1
 ```
 
+When `--run-in-tmux` is used, the command prints the tmux session name, an attach command, and curl commands for testing the launched listeners. If `tmux` is missing, it attempts a best-effort install using the available system package manager, including common Linux package managers, Homebrew on macOS, and Scoop/Chocolatey/Winget on Windows.
+
 Progress is written to stderr. The final stdout is a JSON array sorted by `best-delay-ms`:
 
 ```json
