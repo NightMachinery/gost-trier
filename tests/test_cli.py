@@ -6,12 +6,15 @@ import pytest
 import socksio
 
 from gost_trier.common import (
+    TrierOptions,
     candidate_lines,
     decode_base64_if_needed,
     expand_configs,
     is_http_url,
     parse_duration,
     parse_trier_args,
+    run_trier,
+    sample_iterable,
 )
 from gost_trier.gost import (
     has_listen_args,
@@ -60,6 +63,18 @@ def test_parse_trier_args_accepts_custom_default_jobs():
     )
 
     assert options.jobs == 50
+
+
+def test_parse_trier_args_accepts_enough_delay_and_sample():
+    options = parse_trier_args(
+        ["--enough-delay-ms=750", "--sample=10", "trojan.txt", "--", "-F=MAGIC_FILE_1"],
+        prog="xray-trier",
+        description="test",
+    )
+
+    assert options.enough_delay_ms == 750
+    assert options.sample == 10
+    assert options.shuffle
 
 
 def test_parse_trier_args_preserves_url_sources():
@@ -145,6 +160,54 @@ def test_expand_configs_uses_cartesian_product():
         ["-F=b", "-F=x"],
         ["-F=b", "-F=y"],
     ]
+
+
+def test_sample_iterable_limits_and_randomizes_size():
+    items = [["-F=a"], ["-F=b"], ["-F=c"]]
+
+    sampled = sample_iterable(iter(items), 2)
+
+    assert len(sampled) == 2
+    assert all(item in items for item in sampled)
+
+
+def test_run_trier_stops_when_enough_delay_found(capsys):
+    calls = []
+
+    def fake_substitute(args, values):
+        return [values[0]]
+
+    def fake_run_test(config, test_urls, timeout):
+        calls.append(config)
+        return {"best-delay-ms": 100, "config": config, "tests": []}
+
+    options = TrierOptions(
+        files=[],
+        runner_args=["-F=MAGIC_FILE_1"],
+        test_urls=["https://example.com"],
+        shuffle=False,
+        timeout=1,
+        jobs=1,
+        enough_delay_ms=200,
+        sample=None,
+        run_in_tmux=None,
+        run_top=1,
+    )
+
+    def fake_read_candidate_files(files, shuffle):
+        return [["a", "b", "c"]]
+
+    import gost_trier.common as common
+
+    original = common.read_candidate_files
+    common.read_candidate_files = fake_read_candidate_files
+    try:
+        run_trier(options, substitute=fake_substitute, run_test=fake_run_test, run_tmux=lambda session, results, top: None)
+    finally:
+        common.read_candidate_files = original
+
+    assert calls == [["a"]]
+    assert '"best-delay-ms": 100' in capsys.readouterr().out
 
 
 def test_tmux_command_quotes_config():

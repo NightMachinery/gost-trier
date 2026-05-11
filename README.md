@@ -40,6 +40,12 @@ Run the fastest result in tmux with SOCKS and HTTP listeners:
 xray-trier --timeout=5s --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
 ```
 
+Sample 100 configs from a larger subscription and stop early if a fast enough config is found:
+
+```sh
+xray-trier --timeout=5s --sample=100 --enough-delay-ms=800 --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
+```
+
 To upgrade later, `uv tool upgrade` uses uv's recorded tool requirement:
 
 ```sh

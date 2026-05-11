@@ -26,6 +26,7 @@ DEFAULT_TEST_URLS = ["https://api.ipify.org", "https://myip.wtf/json"]
 TRIER_EPILOG = """examples:
   %(prog)s trojan.txt -- -F=MAGIC_FILE_1
   %(prog)s --shuffle --timeout=5s --jobs=20 trojan.txt -- -L=socks5://127.0.0.1:1050 -F=MAGIC_FILE_1
+  %(prog)s --sample=100 --enough-delay-ms=800 https://example.com/sub.txt -- -F=MAGIC_FILE_1
   %(prog)s https://example.com/sub.txt -- -F=MAGIC_FILE_1
 
 candidate sources:
@@ -43,6 +44,8 @@ class TrierOptions:
     shuffle: bool
     timeout: float
     jobs: int
+    enough_delay_ms: float | None
+    sample: int | None
     run_in_tmux: str | None
     run_top: int
 
@@ -81,6 +84,8 @@ def parse_trier_args(
     parser.add_argument("--shuffle", action="store_true", help="shuffle each candidate source before testing")
     parser.add_argument("--timeout", type=parse_duration, default=20.0, help="per-URL timeout, e.g. 500ms, 5s, 1m")
     parser.add_argument("--jobs", type=int, default=default_jobs, help=f"parallel configs to test (default: {default_jobs})")
+    parser.add_argument("--enough-delay-ms", type=float, help="stop submitting new configs after finding this latency or lower")
+    parser.add_argument("--sample", type=int, metavar="N", help="randomly sample N expanded configs; implies --shuffle")
     parser.add_argument("--run-in-tmux", metavar="SESSION", help="launch the fastest working configs in this tmux session")
     parser.add_argument("--run-top", type=int, default=1, help="number of working configs to launch with --run-in-tmux")
 
@@ -97,6 +102,10 @@ def parse_trier_args(
         parser.error("runner args are required after --")
     if namespace.jobs < 1:
         parser.error("--jobs must be >= 1")
+    if namespace.enough_delay_ms is not None and namespace.enough_delay_ms < 0:
+        parser.error("--enough-delay-ms must be >= 0")
+    if namespace.sample is not None and namespace.sample < 1:
+        parser.error("--sample must be >= 1")
     if namespace.run_top < 1:
         parser.error("--run-top must be >= 1")
 
@@ -104,9 +113,11 @@ def parse_trier_args(
         files=namespace.files,
         runner_args=runner_args,
         test_urls=namespace.test_urls or list(DEFAULT_TEST_URLS),
-        shuffle=namespace.shuffle,
+        shuffle=namespace.shuffle or namespace.sample is not None,
         timeout=namespace.timeout,
         jobs=namespace.jobs,
+        enough_delay_ms=namespace.enough_delay_ms,
+        sample=namespace.sample,
         run_in_tmux=namespace.run_in_tmux,
         run_top=namespace.run_top,
     )
@@ -168,6 +179,19 @@ def expand_configs(
 ) -> Iterable[list[str]]:
     for values in itertools.product(*candidates):
         yield substitute(runner_args, values)
+
+
+def sample_iterable(items: Iterable[list[str]], sample_size: int) -> list[list[str]]:
+    sample: list[list[str]] = []
+    for index, item in enumerate(items, start=1):
+        if index <= sample_size:
+            sample.append(item)
+            continue
+        replacement = random.randrange(index)
+        if replacement < sample_size:
+            sample[replacement] = item
+    random.shuffle(sample)
+    return sample
 
 
 def free_port() -> int:
@@ -288,26 +312,19 @@ def run_trier(
     total = 1
     for lines in candidates:
         total *= len(lines)
-    print(f"Testing {total} config(s) with jobs={options.jobs}", file=sys.stderr)
 
     results: list[dict[str, Any]] = []
     configs = expand_configs(options.runner_args, candidates, substitute)
+    if options.sample is not None:
+        configs = sample_iterable(configs, options.sample)
+        sampled_total = len(configs)
+        print(f"Testing {sampled_total} sampled config(s) from {total} total with jobs={options.jobs}", file=sys.stderr)
+        total = sampled_total
+    else:
+        print(f"Testing {total} config(s) with jobs={options.jobs}", file=sys.stderr)
+
     if options.jobs != 1:
-        with ThreadPoolExecutor(max_workers=options.jobs) as executor:
-            future_to_index = {
-                executor.submit(run_test, config, options.test_urls, options.timeout): index
-                for index, config in enumerate(configs, start=1)
-            }
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                print(f"[{index}/{total}] tested", file=sys.stderr)
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    print(f"[{index}/{total}] skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
-                    continue
-                if result is not None:
-                    results.append(result)
+        results.extend(run_parallel_tests(configs, total, options, run_test))
     else:
         for index, config in enumerate(configs, start=1):
             print(f"[{index}/{total}] testing", file=sys.stderr)
@@ -318,6 +335,9 @@ def run_trier(
                 continue
             if result is not None:
                 results.append(result)
+                if is_enough_result(result, options.enough_delay_ms):
+                    print(f"[{index}/{total}] enough: {result['best-delay-ms']} ms", file=sys.stderr)
+                    break
 
     results.sort(key=lambda item: item["best-delay-ms"])
     if options.run_in_tmux:
@@ -325,3 +345,56 @@ def run_trier(
     json.dump(results, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
+
+
+def run_parallel_tests(
+    configs: Iterable[list[str]],
+    total: int,
+    options: TrierOptions,
+    run_test: TestRunner,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    indexed_configs = enumerate(configs, start=1)
+    executor = ThreadPoolExecutor(max_workers=options.jobs)
+    future_to_index = {}
+    stop = False
+    try:
+        for _ in range(options.jobs):
+            try:
+                index, config = next(indexed_configs)
+            except StopIteration:
+                break
+            future_to_index[executor.submit(run_test, config, options.test_urls, options.timeout)] = index
+
+        while future_to_index:
+            for future in as_completed(future_to_index):
+                index = future_to_index.pop(future)
+                print(f"[{index}/{total}] tested", file=sys.stderr)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    print(f"[{index}/{total}] skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
+                    result = None
+                if result is not None:
+                    results.append(result)
+                    if is_enough_result(result, options.enough_delay_ms):
+                        print(f"[{index}/{total}] enough: {result['best-delay-ms']} ms", file=sys.stderr)
+                        stop = True
+                if stop:
+                    break
+                try:
+                    next_index, next_config = next(indexed_configs)
+                except StopIteration:
+                    continue
+                future_to_index[executor.submit(run_test, next_config, options.test_urls, options.timeout)] = next_index
+            if stop:
+                for pending in future_to_index:
+                    pending.cancel()
+                break
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    return results
+
+
+def is_enough_result(result: dict[str, Any], enough_delay_ms: float | None) -> bool:
+    return enough_delay_ms is not None and result["best-delay-ms"] <= enough_delay_ms
