@@ -4,6 +4,7 @@ import argparse
 import copy
 import json
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -289,7 +290,8 @@ def exec_xray(args: Sequence[str]) -> None:
 
 def listener_curl_command(listen: Listen, url: str = "https://api.ipify.org") -> str:
     proxy = listener_proxy_url(listen)
-    return " ".join(shlex.quote(part) for part in ["curl", "--proxy", proxy, url])
+    curl = "curl.exe" if platform.system().lower() == "windows" else "curl"
+    return " ".join(shlex.quote(part) for part in [curl, "--proxy", proxy, url])
 
 
 def listener_proxy_url(listen: Listen) -> str:

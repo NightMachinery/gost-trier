@@ -160,6 +160,12 @@ def test_gost_listener_curl_command_uses_listener_scheme():
     )
 
 
+def test_gost_listener_curl_command_uses_curl_exe_on_windows(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+
+    assert gost_listener_curl_command("http://user:pass@:2080").startswith("curl.exe --proxy ")
+
+
 def test_gost_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):
     launched = []
 
@@ -356,6 +362,12 @@ def test_listener_curl_command_uses_http_auth_and_loopback_for_wildcard():
     assert command == "curl --proxy http://user:password@127.0.0.1:2060 https://api.ipify.org"
 
 
+def test_xray_listener_curl_command_uses_curl_exe_on_windows(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+
+    assert listener_curl_command(parse_listen("socks5://127.0.0.1:1050")).startswith("curl.exe --proxy ")
+
+
 def test_listener_proxy_url_percent_encodes_auth():
     proxy = listener_proxy_url(parse_listen("http://u%20s:p%40ss@:2060"))
 
@@ -444,6 +456,16 @@ def test_print_xray_tmux_launch_info_includes_attach_and_curl(capsys):
     assert "attach: tmux attach -t xray-1080" in err
     assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
     assert "curl --proxy http://127.0.0.1:2080 https://api.ipify.org" in err
+
+
+def test_print_xray_tmux_launch_info_uses_curl_exe_on_windows(monkeypatch, capsys):
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+
+    print_xray_tmux_launch_info("xray-1080", [["-L=socks5://127.0.0.1:1080"]])
+
+    err = capsys.readouterr().err
+    assert "test xray: curl.exe --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
+    assert "powershell" not in err.lower()
 
 
 def test_xray_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):

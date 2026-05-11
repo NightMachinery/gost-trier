@@ -189,4 +189,5 @@ def listener_curl_command(listen: str, url: str = "https://api.ipify.org") -> st
     if parsed.username is not None:
         auth = quote(unquote(parsed.username), safe="") + ":" + quote(unquote(parsed.password or ""), safe="") + "@"
     proxy = f"{scheme}://{auth}{host}:{parsed.port}"
-    return " ".join(shlex.quote(part) for part in ["curl", "--proxy", proxy, url])
+    curl = "curl.exe" if platform.system().lower() == "windows" else "curl"
+    return " ".join(shlex.quote(part) for part in [curl, "--proxy", proxy, url])
