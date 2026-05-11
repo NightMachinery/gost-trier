@@ -10,6 +10,13 @@ Install the commands locally with uv:
 uv tool install git+https://github.com/NightMachinery/gost-trier.git
 ```
 
+From an existing local checkout:
+
+```sh
+cd /path/to/gost-trier
+uv tool install .
+```
+
 This installs `gost-trier`, `xray-trier`, and `xray-run` so they can be run without `uv run`:
 
 ```sh
