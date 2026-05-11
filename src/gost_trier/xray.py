@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from .common import free_port, is_successful_test, test_url, wait_for_port
 from .gost import ensure_tmux_session, strip_listen_args
@@ -32,6 +32,8 @@ class Listen:
     host: str
     port: int
     scheme: str
+    username: str | None = None
+    password: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,11 +78,17 @@ def parse_xray_args(args: Sequence[str], *, auto_listen: bool = True) -> XrayArg
 
 def parse_listen(value: str) -> Listen:
     parsed = urlparse(value)
-    if parsed.scheme not in {"socks", "socks5", "socks5h"}:
+    if parsed.scheme not in {"http", "socks", "socks5", "socks5h"}:
         raise ValueError(f"unsupported xray listener scheme: {parsed.scheme or value}")
-    if not parsed.hostname or parsed.port is None:
-        raise ValueError(f"listener must include host and port: {value}")
-    return Listen(host=parsed.hostname, port=parsed.port, scheme=parsed.scheme)
+    if parsed.port is None:
+        raise ValueError(f"listener must include port: {value}")
+    return Listen(
+        host=parsed.hostname or "0.0.0.0",
+        port=parsed.port,
+        scheme=parsed.scheme,
+        username=unquote(parsed.username) if parsed.username else None,
+        password=unquote(parsed.password) if parsed.password else None,
+    )
 
 
 def locate_converter() -> list[str]:
@@ -192,19 +200,37 @@ def build_xray_config(args: XrayArgs, *, converter: Sequence[str] | None = None)
 
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [
-            {
-                "tag": "socks-in",
-                "listen": listen.host,
-                "port": listen.port,
-                "protocol": "socks",
-                "settings": {"auth": "noauth", "udp": True},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
-            }
-        ],
+        "inbounds": [build_inbound(listen)],
         "outbounds": outbounds,
         "routing": {"rules": [{"type": "field", "inboundTag": ["socks-in"], "outboundTag": "proxy-1"}]},
     }
+
+
+def build_inbound(listen: Listen) -> dict[str, Any]:
+    protocol = "http" if listen.scheme == "http" else "socks"
+    inbound = {
+        "tag": "socks-in",
+        "listen": listen.host,
+        "port": listen.port,
+        "protocol": protocol,
+        "settings": inbound_settings(listen),
+        "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
+    }
+    return inbound
+
+
+def inbound_settings(listen: Listen) -> dict[str, Any]:
+    if listen.scheme == "http":
+        settings: dict[str, Any] = {}
+        if listen.username is not None:
+            settings["accounts"] = [{"user": listen.username, "pass": listen.password or ""}]
+        return settings
+
+    settings = {"auth": "noauth", "udp": True}
+    if listen.username is not None:
+        settings["auth"] = "password"
+        settings["accounts"] = [{"user": listen.username, "pass": listen.password or ""}]
+    return settings
 
 
 def validate_xray_config(config: dict[str, Any]) -> None:
@@ -241,8 +267,17 @@ def exec_xray(args: Sequence[str]) -> None:
 
 
 def listener_curl_command(listen: Listen, url: str = "https://api.ipify.org") -> str:
-    proxy = f"socks5h://{listen.host}:{listen.port}"
+    proxy = listener_proxy_url(listen)
     return " ".join(shlex.quote(part) for part in ["curl", "--proxy", proxy, url])
+
+
+def listener_proxy_url(listen: Listen) -> str:
+    scheme = "http" if listen.scheme == "http" else "socks5h"
+    host = "127.0.0.1" if listen.host == "0.0.0.0" else listen.host
+    auth = ""
+    if listen.username is not None:
+        auth = quote(listen.username, safe="") + ":" + quote(listen.password or "", safe="") + "@"
+    return f"{scheme}://{auth}{host}:{listen.port}"
 
 
 def print_listener_curl_commands(listens: Sequence[Listen]) -> None:

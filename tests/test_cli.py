@@ -22,7 +22,9 @@ from gost_trier.placeholders import substitute_placeholders
 from gost_trier.xray import (
     XrayArgs,
     build_xray_config,
+    build_inbound,
     listener_curl_command,
+    listener_proxy_url,
     normalize_outbound,
     parse_listen,
     parse_converter_json,
@@ -160,6 +162,24 @@ def test_parse_xray_args_accepts_gost_like_flags():
     assert parsed.forwards == ["first", "second"]
 
 
+def test_parse_listen_defaults_missing_host_to_all_interfaces():
+    parsed = parse_listen("http://user:password@:2060")
+
+    assert parsed.scheme == "http"
+    assert parsed.host == "0.0.0.0"
+    assert parsed.port == 2060
+    assert parsed.username == "user"
+    assert parsed.password == "password"
+
+
+def test_parse_listen_allows_socks_auth():
+    parsed = parse_listen("socks5://user:password@:1080")
+
+    assert parsed.host == "0.0.0.0"
+    assert parsed.username == "user"
+    assert parsed.password == "password"
+
+
 def test_parse_xray_args_auto_listen(monkeypatch):
     monkeypatch.setattr("gost_trier.xray.free_port", lambda: 34567)
 
@@ -173,6 +193,38 @@ def test_listener_curl_command_uses_socks5h():
     command = listener_curl_command(parse_listen("socks5://127.0.0.1:1050"))
 
     assert command == "curl --proxy socks5h://127.0.0.1:1050 https://api.ipify.org"
+
+
+def test_listener_curl_command_uses_http_auth_and_loopback_for_wildcard():
+    command = listener_curl_command(parse_listen("http://user:password@:2060"))
+
+    assert command == "curl --proxy http://user:password@127.0.0.1:2060 https://api.ipify.org"
+
+
+def test_listener_proxy_url_percent_encodes_auth():
+    proxy = listener_proxy_url(parse_listen("http://u%20s:p%40ss@:2060"))
+
+    assert proxy == "http://u%20s:p%40ss@127.0.0.1:2060"
+
+
+def test_build_inbound_for_http_auth():
+    inbound = build_inbound(parse_listen("http://user:password@:2060"))
+
+    assert inbound["listen"] == "0.0.0.0"
+    assert inbound["port"] == 2060
+    assert inbound["protocol"] == "http"
+    assert inbound["settings"] == {"accounts": [{"user": "user", "pass": "password"}]}
+
+
+def test_build_inbound_for_socks_auth():
+    inbound = build_inbound(parse_listen("socks5://user:password@:1080"))
+
+    assert inbound["protocol"] == "socks"
+    assert inbound["settings"] == {
+        "auth": "password",
+        "udp": True,
+        "accounts": [{"user": "user", "pass": "password"}],
+    }
 
 
 def test_normalize_outbound_removes_send_through():
