@@ -4,18 +4,30 @@
 
 ## Install
 
-Install uv if needed; on Linux/macOS:
+Install `uv` if needed; on Linux/macOS:
 
 ```sh
 curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_PRINT_VERBOSE=1 sh
 ```
 
-On Windows, you can install uv using Powershell:
+On Windows, you can install `uv` using Powershell:
 ```
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Install the commands locally with uv:
+You need to restart (re-open) your terminal (shell) if you didn't have `uv` installed before.
+
+To restart Powershell, you need to run:
+
+```
+exit
+```
+
+Then re-open the terminal.
+
+---
+
+Install the commands locally with `uv`:
 
 ```sh
 uv tool install 'git+https://github.com/NightMachinery/gost-trier.git'
@@ -43,10 +55,10 @@ xray-trier --timeout=5s --run-in-tmux=xray-1080 'https://raw.githubusercontent.c
 Sample 100 configs from a larger subscription and stop early if a fast enough config is found:
 
 ```sh
-xray-trier --timeout=5s --sample=100 --enough-delay-ms=800 --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
+xray-trier --timeout=5s --sample=100 --enough-delay-ms=200 --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
 ```
 
-To upgrade later, `uv tool upgrade` uses uv's recorded tool requirement:
+To upgrade later, `uv tool upgrade` uses `uv`'s recorded tool requirement:
 
 ```sh
 uv tool upgrade gost-trier
