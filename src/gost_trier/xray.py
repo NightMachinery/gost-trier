@@ -230,11 +230,24 @@ def xray_run_json(args: Sequence[str], *, validate: bool = True) -> dict[str, An
 
 
 def exec_xray(args: Sequence[str]) -> None:
-    config = xray_run_json(args)
+    parsed = parse_xray_args(args)
+    config = build_xray_config(parsed)
+    validate_xray_config(config)
+    print_listener_curl_commands(parsed.listens)
     temp = tempfile.NamedTemporaryFile("w", suffix=".json", prefix="xray-run-", delete=False)
     with temp:
         json.dump(config, temp)
     os.execvp("xray", ["xray", "run", "-c", temp.name])
+
+
+def listener_curl_command(listen: Listen, url: str = "https://api.ipify.org") -> str:
+    proxy = f"socks5h://{listen.host}:{listen.port}"
+    return " ".join(shlex.quote(part) for part in ["curl", "--proxy", proxy, url])
+
+
+def print_listener_curl_commands(listens: Sequence[Listen]) -> None:
+    for listen in listens:
+        print(f"xray-run: test with: {listener_curl_command(listen)}", file=sys.stderr)
 
 
 def run_xray_test(config_args: Sequence[str], test_urls: Sequence[str], timeout: float) -> dict[str, Any] | None:

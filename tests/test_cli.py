@@ -22,6 +22,7 @@ from gost_trier.placeholders import substitute_placeholders
 from gost_trier.xray import (
     XrayArgs,
     build_xray_config,
+    listener_curl_command,
     normalize_outbound,
     parse_listen,
     parse_converter_json,
@@ -166,6 +167,12 @@ def test_parse_xray_args_auto_listen(monkeypatch):
 
     assert parsed.listens[0].host == "127.0.0.1"
     assert parsed.listens[0].port == 34567
+
+
+def test_listener_curl_command_uses_socks5h():
+    command = listener_curl_command(parse_listen("socks5://127.0.0.1:1050"))
+
+    assert command == "curl --proxy socks5h://127.0.0.1:1050 https://api.ipify.org"
 
 
 def test_normalize_outbound_removes_send_through():
