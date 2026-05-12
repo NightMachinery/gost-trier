@@ -282,14 +282,15 @@ def inbound_settings(listen: Listen) -> dict[str, Any]:
 
 def validate_xray_config(config: dict[str, Any], *, verbose: int = 0) -> None:
     xray_bin = ensure_xray_dependency(verbose=verbose)
-    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="xray-run-test-", delete=True) as file:
-        json.dump(config, file)
-        file.flush()
-        command = [xray_bin, "run", "-test", "-c", file.name]
+    config_path = write_temp_xray_config(config, prefix="xray-run-test-")
+    try:
+        command = [xray_bin, "run", "-test", "-c", str(config_path)]
         completed = run_logged(command, verbose=verbose)
         if completed.returncode != 0:
             details = completed_process_details(completed, command=command)
             raise ValueError(f"generated Xray config failed validation\n{details}")
+    finally:
+        config_path.unlink(missing_ok=True)
 
 
 def xray_run_json(args: Sequence[str], *, validate: bool = True, verbose: int = 0) -> dict[str, Any]:
@@ -532,16 +533,24 @@ def smoke_test_xray(xray_bin: str, *, verbose: int = 0) -> None:
         verbose_log(verbose, 1, f"Xray version: {first_line}")
 
     config = {"log": {"loglevel": "warning"}, "inbounds": [], "outbounds": [{"protocol": "freedom", "settings": {}}]}
-    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="xray-run-smoke-", delete=True) as file:
-        json.dump(config, file)
-        file.flush()
-        command = [xray_bin, "run", "-test", "-c", file.name]
+    config_path = write_temp_xray_config(config, prefix="xray-run-smoke-")
+    try:
+        command = [xray_bin, "run", "-test", "-c", str(config_path)]
         completed = run_logged(command, verbose=verbose)
+    finally:
+        config_path.unlink(missing_ok=True)
     if completed.returncode != 0:
         raise RuntimeError(f"Xray smoke test failed\n{completed_process_details(completed, command=command)}")
     with _SMOKE_CHECK_LOCK:
         _SMOKE_CHECKED.add(key)
     verbose_log(verbose, 1, "Xray smoke test passed")
+
+
+def write_temp_xray_config(config: dict[str, Any], *, prefix: str) -> Path:
+    temp = tempfile.NamedTemporaryFile("w", suffix=".json", prefix=prefix, delete=False)
+    with temp:
+        json.dump(config, temp)
+    return Path(temp.name)
 
 
 def smoke_test_converter(command: Sequence[str], *, verbose: int = 0) -> None:

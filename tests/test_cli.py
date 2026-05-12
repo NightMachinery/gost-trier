@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import subprocess
+from pathlib import Path
 
 import pytest
 import socksio
@@ -498,6 +499,24 @@ def test_validate_xray_config_failure_includes_validator_output(monkeypatch):
     assert "validator stderr" in message
 
 
+def test_validate_xray_config_closes_temp_file_before_xray_reads_it(monkeypatch):
+    seen_paths = []
+
+    def fake_run(command, **kwargs):
+        path = Path(command[-1])
+        assert path.read_text()
+        seen_paths.append(path)
+        return subprocess.CompletedProcess(command, 0, stdout="Configuration OK.\n", stderr="")
+
+    monkeypatch.setattr("gost_trier.xray.ensure_xray_dependency", lambda verbose=0: "xray")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    validate_xray_config({"outbounds": [{"protocol": "freedom", "settings": {}}]}, verbose=2)
+
+    assert seen_paths
+    assert not seen_paths[0].exists()
+
+
 def test_xray_run_main_passes_subcommand_verbose(monkeypatch, capsys):
     seen = {}
 
@@ -546,11 +565,15 @@ def test_xray_run_main_accepts_stdout_output(monkeypatch, capsys):
 
 def test_xray_dependency_smoke_test_checks_version_and_config(monkeypatch):
     commands = []
+    seen_paths = []
 
     def fake_run(command, **kwargs):
         commands.append(command)
         if command[1] == "version":
             return subprocess.CompletedProcess(command, 0, stdout="Xray test-version\n", stderr="")
+        path = Path(command[-1])
+        assert path.read_text()
+        seen_paths.append(path)
         return subprocess.CompletedProcess(command, 0, stdout="Configuration OK.\n", stderr="")
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -559,6 +582,8 @@ def test_xray_dependency_smoke_test_checks_version_and_config(monkeypatch):
     smoke_test_xray("xray", verbose=1)
 
     assert [command[:2] for command in commands] == [["xray", "version"], ["xray", "run"]]
+    assert seen_paths
+    assert not seen_paths[0].exists()
 
 
 def test_converter_smoke_test_requires_outbounds(monkeypatch):
