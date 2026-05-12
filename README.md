@@ -71,7 +71,7 @@ The following will find the fastest config from the given URL https://raw.github
 run it in tmux with the configured SOCKS and HTTP listeners:
 
 ```sh
-xray-trier -o trier_results.json --timeout=5s --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
+xray-trier -o trier_results.json --timeout=5s --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt' -- '-L=socks5://127.0.0.1:1080' '-L=http://127.0.0.1:2080' '-F=MAGIC_FILE_1'
 ```
 
 The results of this investigation are written to `trier_results.json`.
@@ -81,7 +81,7 @@ If tmux is unavailable, `--run-in-tmux` falls back to managed detached processes
 Sample 100 configs from a larger subscription and stop early if a fast enough config is found:
 
 ```sh
-xray-trier -o trier_results.json --timeout=5s --sample=100 --enough-delay-ms=200 --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt' -- -L=socks5://127.0.0.1:1080 -L=http://127.0.0.1:2080 -F=MAGIC_FILE_1
+xray-trier -o trier_results.json --timeout=5s --sample=100 --enough-delay-ms=200 --run-in-tmux=xray-1080 'https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/All_Configs_Sub.txt' -- '-L=socks5://127.0.0.1:1080' '-L=http://127.0.0.1:2080' '-F=MAGIC_FILE_1'
 ```
 
 See [docs/usage.md](docs/usage.md) for more.
