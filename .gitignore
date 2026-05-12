@@ -2,6 +2,7 @@ trojan.txt
 
 good.json
 xray-run-debug.json
+trier_results.json
 
 .venv/
 __pycache__/
