@@ -1440,6 +1440,7 @@ def test_xray_tui_link_display_name_decodes_fragment_and_falls_back_to_host_port
     assert link_display_name("trojan://user@example.com:443", fallback="x") == "example.com:443"
     assert link_display_name("direct://", fallback="x") == "x"
     assert link_display_name("trojan://8r<[9'l6hAO#8ZQi@example.com:443", fallback="x") == "x"
+    assert link_display_name("trojan://user@example.com:Turkey", fallback="x") == "example.com"
 
 
 def test_xray_tui_malformed_subscription_link_does_not_crash_cache_load(monkeypatch, tmp_path):

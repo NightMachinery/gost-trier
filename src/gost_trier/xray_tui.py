@@ -466,8 +466,12 @@ def link_display_name(link: str, *, fallback: str) -> str:
             return decoded
     if parsed.hostname:
         host = parsed.hostname
-        if parsed.port is not None:
-            return f"{host}:{parsed.port}"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is not None:
+            return f"{host}:{port}"
         return host
     return fallback
 
