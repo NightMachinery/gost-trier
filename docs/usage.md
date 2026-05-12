@@ -97,6 +97,8 @@ Xray itself is discovered in this order:
 2. `xray` on `PATH`
 3. cached or downloaded GitHub release binaries from `XTLS/Xray-core`
 
+Release archive downloads and remote candidate-list downloads show byte progress on stderr by default. Use `--no-progress` to hide progress bars, or `--progress` to make the default explicit. If Python's active proxy settings route a download through a proxy, the first download prints `Using proxy for downloads: ...` with proxy credentials redacted.
+
 `xray-trier` runs Xray and `Xray-Link-Json` resolution plus native smoke checks once before starting parallel config tests. The checks are cached for the rest of the process, including direct `xray-run` setup calls.
 
 For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order.

@@ -16,6 +16,8 @@ from pathlib import Path
 from threading import Lock
 from urllib.request import Request, urlopen
 
+from .downloads import download_file
+
 
 GITHUB_API = "https://api.github.com/repos"
 DEFAULT_CACHE_ROOT = Path.home() / ".cache" / "gost-trier"
@@ -129,12 +131,6 @@ def resolve_release_binary(
         shutil.copy2(binary, installed)
         make_executable(installed)
         return installed
-
-
-def download_file(url: str, destination: Path) -> None:
-    request = Request(url, headers={"User-Agent": "gost-trier/0.1.0"})
-    with urlopen(request, timeout=120) as response, destination.open("wb") as file:
-        shutil.copyfileobj(response, file)
 
 
 def verify_digest(path: Path, digest: str | None) -> None:

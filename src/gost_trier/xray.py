@@ -28,6 +28,7 @@ from .common import (
     write_json_output,
 )
 from .diagnostics import completed_process_details, dump_json_for_debug, run_logged, verbose_log
+from .downloads import set_download_progress_enabled
 from .gost import ensure_tmux_session, strip_listen_args
 from .native import locate_xray, locate_xray_link_json
 from .sessions import run_managed_session
@@ -458,6 +459,9 @@ If no -F is provided, direct:// is used.
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("-v", "--verbose", action="count", default=0, help="increase diagnostic output; repeat for more detail")
+    parser.add_argument("--progress", dest="progress", action="store_true", help="show download progress bars")
+    parser.add_argument("--no-progress", dest="progress", action="store_false", help="hide download progress bars")
+    parser.set_defaults(progress=True)
     subparsers = parser.add_subparsers(dest="mode", metavar="{json,exec}", required=True)
     add_xray_run_subparser(
         subparsers,
@@ -480,6 +484,7 @@ If no -F is provided, direct:// is used.
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     namespace, runner_args = parser.parse_known_args(raw_argv)
     namespace.verbose = max(namespace.verbose, count_verbose_flags(raw_argv))
+    set_download_progress_enabled(namespace.progress)
     runner_args = normalize_split_url_args(runner_args)
     if runner_args and runner_args[0] == "--":
         runner_args = runner_args[1:]
@@ -518,6 +523,8 @@ def add_xray_run_subparser(
         default=argparse.SUPPRESS,
         help="increase diagnostic output; repeat for more detail",
     )
+    subparser.add_argument("--progress", dest="progress", action="store_true", default=argparse.SUPPRESS, help="show download progress bars")
+    subparser.add_argument("--no-progress", dest="progress", action="store_false", default=argparse.SUPPRESS, help="hide download progress bars")
     if name == "json":
         subparser.add_argument("-o", "--output", default="-", help="write generated JSON to this file, or - for stdout")
 

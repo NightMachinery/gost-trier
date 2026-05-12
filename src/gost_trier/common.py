@@ -17,9 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 import httpx
+
+from .downloads import download_bytes, set_download_progress_enabled
 
 
 DEFAULT_TEST_URLS = ["https://api.ipify.org", "https://myip.wtf/json"]
@@ -50,6 +51,7 @@ class TrierOptions:
     run_top: int
     verbose: int
     output: str
+    progress: bool
 
 
 def parse_duration(value: str) -> float:
@@ -92,6 +94,9 @@ def parse_trier_args(
     parser.add_argument("--run-top", type=int, default=1, help="number of working configs to launch with --run-in-tmux")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="increase diagnostic output; repeat for more detail")
     parser.add_argument("-o", "--output", default="-", help="write final JSON to this file, or - for stdout")
+    parser.add_argument("--progress", dest="progress", action="store_true", help="show download progress bars")
+    parser.add_argument("--no-progress", dest="progress", action="store_false", help="hide download progress bars")
+    parser.set_defaults(progress=True)
 
     if "--" not in argv:
         parser.parse_args(argv)
@@ -126,6 +131,7 @@ def parse_trier_args(
         run_top=namespace.run_top,
         verbose=namespace.verbose,
         output=namespace.output,
+        progress=namespace.progress,
     )
 
 
@@ -170,9 +176,7 @@ def is_http_url(source: str) -> bool:
 
 
 def download_source(url: str) -> bytes:
-    request = Request(url, headers={"User-Agent": "gost-trier/0.1.0"})
-    with urlopen(request, timeout=30) as response:
-        return response.read()
+    return download_bytes(url, timeout=30)
 
 
 def decode_base64_if_needed(raw: bytes) -> bytes:
@@ -330,6 +334,7 @@ def run_trier(
     run_tmux: TmuxRunner,
     preflight: PreflightRunner | None = None,
 ) -> int:
+    set_download_progress_enabled(options.progress)
     candidates = read_candidate_files(options.files, options.shuffle)
     total = 1
     for lines in candidates:

@@ -22,6 +22,13 @@ from gost_trier.common import (
     run_trier,
     sample_iterable,
 )
+from gost_trier.downloads import (
+    content_length,
+    download_file,
+    download_proxy_for_url,
+    print_proxy_notice,
+    redact_proxy_url,
+)
 from gost_trier.gost import (
     has_listen_args,
     listen_args,
@@ -77,6 +84,7 @@ def test_parse_args_strips_separator_and_defaults():
     assert options.timeout == 20.0
     assert options.jobs == 1
     assert options.output == "-"
+    assert options.progress
 
 
 def test_parse_trier_args_normalizes_shell_split_runner_urls():
@@ -126,6 +134,16 @@ def test_parse_trier_args_accepts_output():
     )
 
     assert options.output == "results/out.json"
+
+
+def test_parse_trier_args_accepts_no_progress():
+    options = parse_trier_args(
+        ["--no-progress", "trojan.txt", "--", "-F=MAGIC_FILE_1"],
+        prog="xray-trier",
+        description="test",
+    )
+
+    assert not options.progress
 
 
 def test_parse_trier_args_preserves_url_sources():
@@ -255,6 +273,85 @@ def test_xray_asset_names():
     assert xray_asset_name("v26.3.27", "windows", "amd64") == "Xray-windows-64.zip"
 
 
+def test_content_length_handles_missing_and_invalid_values():
+    class Response:
+        headers = {}
+
+    assert content_length(Response()) is None
+    Response.headers = {"Content-Length": "bad"}
+    assert content_length(Response()) is None
+    Response.headers = {"Content-Length": "-1"}
+    assert content_length(Response()) is None
+    Response.headers = {"Content-Length": "123"}
+    assert content_length(Response()) == 123
+
+
+def test_download_file_streams_with_progress(monkeypatch, tmp_path):
+    updates = []
+
+    class Response:
+        headers = {"Content-Length": "6"}
+
+        def __init__(self):
+            self.chunks = [b"abc", b"def", b""]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self, size):
+            assert size > 0
+            return self.chunks.pop(0)
+
+    class Progress:
+        def __init__(self, **kwargs):
+            assert kwargs["total"] == 6
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def update(self, size):
+            updates.append(size)
+
+    monkeypatch.setattr("gost_trier.downloads.urlopen", lambda request, timeout: Response())
+    monkeypatch.setattr("gost_trier.downloads.tqdm", Progress)
+    monkeypatch.setattr("gost_trier.downloads.print_proxy_notice", lambda url: None)
+
+    destination = tmp_path / "archive.zip"
+    download_file("https://example.com/archive.zip", destination)
+
+    assert destination.read_bytes() == b"abcdef"
+    assert updates == [3, 3]
+
+
+def test_download_proxy_for_url_respects_proxy_and_bypass(monkeypatch):
+    monkeypatch.setattr("gost_trier.downloads.getproxies", lambda: {"https": "http://127.0.0.1:8080"})
+    monkeypatch.setattr("gost_trier.downloads.proxy_bypass", lambda host: host == "localhost")
+
+    assert download_proxy_for_url("https://example.com/file.zip") == "http://127.0.0.1:8080"
+    assert download_proxy_for_url("https://localhost/file.zip") is None
+
+
+def test_proxy_notice_prints_once_and_redacts_credentials(monkeypatch, capsys):
+    monkeypatch.setattr("gost_trier.downloads._PROXY_NOTICE_PRINTED", False)
+    monkeypatch.setattr("gost_trier.downloads.download_proxy_for_url", lambda url: "http://user:pass@127.0.0.1:8080")
+
+    print_proxy_notice("https://example.com/one.zip")
+    print_proxy_notice("https://example.com/two.zip")
+
+    assert capsys.readouterr().err == "Using proxy for downloads: http://***:***@127.0.0.1:8080\n"
+
+
+def test_redact_proxy_url_leaves_proxy_without_credentials():
+    assert redact_proxy_url("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+    assert redact_proxy_url("socks5://user:pass@example.com:1080") == "socks5://***:***@example.com:1080"
+
+
 def test_executable_suffix_uses_windows_extension():
     assert executable_suffix("windows") == ".exe"
     assert executable_suffix("linux") == ""
@@ -321,6 +418,7 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
         run_top=1,
         verbose=2,
         output="-",
+        progress=True,
     )
 
     def fake_read_candidate_files(files, shuffle):
@@ -354,6 +452,7 @@ def test_run_trier_writes_output_file_and_creates_parent_dirs(tmp_path, capsys):
         run_top=1,
         verbose=0,
         output=str(output),
+        progress=True,
     )
 
     import gost_trier.common as common
@@ -389,6 +488,7 @@ def test_run_trier_runs_preflight_before_parallel_workers(capsys):
         run_top=1,
         verbose=0,
         output="-",
+        progress=True,
     )
 
     import gost_trier.common as common
@@ -631,6 +731,7 @@ def test_preflight_xray_trier_resolves_xray_and_converter(monkeypatch):
         run_top=1,
         verbose=3,
         output="-",
+        progress=True,
     )
 
     monkeypatch.setattr("gost_trier.xray.ensure_xray_dependency", lambda verbose=0: calls.append(("xray", verbose)) or "xray")
@@ -667,6 +768,21 @@ def test_xray_run_main_counts_global_verbose(monkeypatch):
 
     assert xray_run_main(["-v", "json", "-v", "-F=direct://"]) == 0
     assert seen["verbose"] == 2
+
+
+def test_xray_run_main_accepts_no_progress_before_or_after_subcommand(monkeypatch, capsys):
+    progress_values = []
+    seen_args = []
+
+    monkeypatch.setattr("gost_trier.xray.set_download_progress_enabled", progress_values.append)
+    monkeypatch.setattr("gost_trier.xray.xray_run_json", lambda args, validate=True, verbose=0: seen_args.append(args) or {})
+
+    assert xray_run_main(["--no-progress", "json", "-F=direct://"]) == 0
+    assert xray_run_main(["json", "--no-progress", "-F=direct://"]) == 0
+
+    assert progress_values == [False, False]
+    assert seen_args == [["-F=direct://"], ["-F=direct://"]]
+    assert capsys.readouterr().out == "{}\n{}\n"
 
 
 def test_xray_run_main_writes_json_output_file(monkeypatch, tmp_path, capsys):
