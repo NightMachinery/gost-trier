@@ -108,7 +108,7 @@ Normal `xray-run` and `xray-trier` startup uses an explicit environment override
 
 `xray-trier` runs Xray and `Xray-Link-Json` resolution plus native smoke checks once before starting parallel config tests. The checks are cached for the rest of the process, including direct `xray-run` setup calls.
 
-For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order.
+For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order. Chained outbounds set `transportLayer: true` so each outbound keeps its `streamSettings` when it dials through the next outbound.
 
 If no `-F` is provided to `xray-run`, it uses a direct connection (`direct://` / Xray `freedom` outbound).
 

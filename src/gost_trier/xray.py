@@ -232,7 +232,7 @@ def build_xray_config(args: XrayArgs, *, converter: Sequence[str] | None = None,
     for index, outbound in enumerate(outbounds, start=1):
         outbound["tag"] = f"proxy-{index}"
         if index < len(outbounds):
-            outbound["proxySettings"] = {"tag": f"proxy-{index + 1}"}
+            outbound["proxySettings"] = {"tag": f"proxy-{index + 1}", "transportLayer": True}
         else:
             outbound.pop("proxySettings", None)
 

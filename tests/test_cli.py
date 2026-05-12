@@ -1208,7 +1208,7 @@ def test_build_xray_config_chains_outbounds(monkeypatch):
 
     assert config["inbounds"][0]["port"] == 1050
     assert config["outbounds"][0]["tag"] == "proxy-1"
-    assert config["outbounds"][0]["proxySettings"] == {"tag": "proxy-2"}
+    assert config["outbounds"][0]["proxySettings"] == {"tag": "proxy-2", "transportLayer": True}
     assert config["outbounds"][1]["tag"] == "proxy-2"
     assert "proxySettings" not in config["outbounds"][1]
     assert "sendThrough" not in config["outbounds"][0]
