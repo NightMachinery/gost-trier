@@ -131,3 +131,17 @@ Progress is written to stderr. The final JSON output is a JSON array sorted by `
   }
 ]
 ```
+
+To keep the generated config for inspection, write JSON to a file with `-o` / `--output`; missing parent directories are created automatically:
+
+```powershell
+xray-run json -o generated_config.json -L=socks5://127.0.0.1:1060 -L=http://127.0.0.1:2060 -F='vless://...'
+```
+
+## Verbosity
+
+For native helper problems, add repeatable `-v` flags. `-v` prints selected helper paths, versions, and smoke-test results; `-vv` also prints subprocess commands, return codes, stdout, and stderr; `-vvv` prints raw share links and the full generated Xray JSON. The verbose output is intentionally unredacted.
+
+```powershell
+xray-run json -vvv -L=socks5://127.0.0.1:1060 -L=http://127.0.0.1:2060 -F='vless://...'
+```
