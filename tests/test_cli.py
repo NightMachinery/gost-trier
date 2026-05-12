@@ -81,6 +81,7 @@ from gost_trier.xray_tui import (
     rotate_configs,
     sample_configs,
     stable_id,
+    startup_refresh_stale_selected_scope,
     subscription_links_from_bytes,
     true_color_enabled,
 )
@@ -1357,6 +1358,23 @@ def test_xray_tui_link_display_name_decodes_fragment_and_falls_back_to_host_port
     assert link_display_name("trojan://user@example.com:443#hello%20world", fallback="x") == "hello world"
     assert link_display_name("trojan://user@example.com:443", fallback="x") == "example.com:443"
     assert link_display_name("direct://", fallback="x") == "x"
+    assert link_display_name("trojan://8r<[9'l6hAO#8ZQi@example.com:443", fallback="x") == "x"
+
+
+def test_xray_tui_malformed_subscription_link_does_not_crash_cache_load(monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr("gost_trier.xray_tui.TUI_CACHE_DIR", cache_dir)
+    sub_id = stable_id("subscription", f"{stable_id('group', 'main')}:https://example.com/sub.txt")
+    cache_file = cache_dir / "subscriptions" / f"{sub_id}.json"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text(json.dumps({"links": ["trojan://8r<[9'l6hAO#8ZQi@example.com:443"], "last_refreshed_at": 123}))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n  - name: main\n    subscriptions:\n      - url: https://example.com/sub.txt\n")
+
+    item = load_tui_config(config_path).groups[0].subgroups[0].configs[0]
+
+    assert item.protocol == "trojan"
+    assert item.name.startswith("config-")
 
 
 def test_xray_tui_hotkey_config_can_override_and_disable(tmp_path):
@@ -1425,6 +1443,20 @@ def test_xray_tui_refresh_subscription_tries_proxy_after_direct(monkeypatch, tmp
 
     assert calls == ["direct", "proxy"]
     assert refreshed.configs[0].name == "Name"
+
+
+def test_xray_tui_startup_refreshes_stale_subscription_before_tui(monkeypatch, tmp_path):
+    monkeypatch.setattr("gost_trier.xray_tui.TUI_CACHE_DIR", tmp_path / "cache")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n  - name: main\n    subscriptions:\n      - url: https://example.com/sub.txt\n")
+    config = load_tui_config(config_path)
+    state = TuiState(active_group_id=config.groups[0].id, active_subgroup_id=config.groups[0].subgroups[0].id)
+    options = parse_tui_args(["--config", str(config_path), "--timeout=1s"])
+    monkeypatch.setattr("gost_trier.xray_tui.download_without_proxy", lambda url, timeout: b"trojan://new#Name\n")
+
+    refreshed = startup_refresh_stale_selected_scope(config, state, options)
+
+    assert refreshed.groups[0].subgroups[0].configs[0].name == "Name"
 
 
 def test_xray_tui_json_config_replaces_inbounds(tmp_path):

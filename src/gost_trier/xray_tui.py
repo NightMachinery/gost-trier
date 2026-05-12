@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlparse
+from urllib.parse import ParseResult, unquote, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 import yaml
@@ -266,6 +266,45 @@ def load_tui_config(path: Path, *, state: TuiState | None = None) -> TuiConfig:
     return TuiConfig(groups=groups)
 
 
+def startup_log(message: str) -> None:
+    print(f"xray-tui: {message}", file=sys.stderr, flush=True)
+
+
+def count_tui_config(config: TuiConfig) -> tuple[int, int, int]:
+    groups = len(config.groups)
+    subscriptions = 0
+    configs = 0
+    for group in config.groups:
+        for subgroup in group.subgroups:
+            if subgroup.subscription is not None:
+                subscriptions += 1
+            configs += len(subgroup.configs)
+    return groups, subscriptions, configs
+
+
+def startup_refresh_stale_selected_scope(config: TuiConfig, state: TuiState, options: TuiOptions) -> TuiConfig:
+    active_group = find_group(config, state.active_group_id)
+    active_subgroup = find_subgroup(active_group, state.active_subgroup_id) if active_group else None
+    if not active_subgroup or not active_subgroup.subscription:
+        startup_log("active scope has no subscription to auto-refresh")
+        return config
+    subscription = active_subgroup.subscription
+    if not subscription_needs_refresh(subscription, options.sub_auto_refresh):
+        startup_log(f"active subscription cache is fresh: {subscription.name}")
+        return config
+
+    startup_log(f"refreshing active subscription before TUI loads: {subscription.name}")
+    started_at = time.monotonic()
+    refreshed = refresh_subscription(subscription, timeout=options.timeout)
+    elapsed = time.monotonic() - started_at
+    if refreshed.error:
+        startup_log(f"refresh failed after {elapsed:.1f}s; keeping cached links: {refreshed.error}")
+    else:
+        startup_log(f"refreshed {len(refreshed.configs)} link(s) in {elapsed:.1f}s")
+    startup_log("reloading config after subscription refresh")
+    return load_tui_config(options.config, state=state)
+
+
 def parse_group(raw: Any, index: int, *, state: TuiState | None) -> ConfigGroup:
     if not isinstance(raw, dict):
         raise ValueError(f"group #{index} must be a mapping")
@@ -345,10 +384,10 @@ def config_item_from_link(
     explicit_name: str | None = None,
     raw: Mapping[str, Any] | None = None,
 ) -> ConfigItem:
-    parsed = urlparse(link)
+    parsed = safe_urlparse(link)
     item_id = stable_id("config", f"{scope}:link:{link}")
     name = explicit_name or link_display_name(link, fallback=f"config-{short_hash(link)}")
-    protocol = parsed.scheme or ("direct" if link == "direct://" else "link")
+    protocol = link_protocol(link, parsed)
     return ConfigItem(id=item_id, name=name, protocol=protocol, source=source, kind="link", link=link, raw=dict(raw or {}))
 
 
@@ -363,12 +402,12 @@ def string_field(raw: Mapping[str, Any], key: str) -> str | None:
 
 
 def looks_like_json_path(value: str) -> bool:
-    parsed = urlparse(value)
+    parsed = safe_urlparse(value)
     return not parsed.scheme and value.lower().endswith(".json")
 
 
 def link_display_name(link: str, *, fallback: str) -> str:
-    parsed = urlparse(link)
+    parsed = safe_urlparse(link)
     if parsed.fragment:
         decoded = unquote(parsed.fragment).strip()
         if decoded:
@@ -379,6 +418,31 @@ def link_display_name(link: str, *, fallback: str) -> str:
             return f"{host}:{parsed.port}"
         return host
     return fallback
+
+
+def safe_urlparse(value: str) -> ParseResult:
+    try:
+        return urlparse(value)
+    except ValueError:
+        return ParseResult(scheme=link_scheme(value), netloc="", path=value, params="", query="", fragment="")
+
+
+def link_protocol(link: str, parsed: ParseResult) -> str:
+    if parsed.scheme:
+        return parsed.scheme
+    if link == "direct://":
+        return "direct"
+    return link_scheme(link) or "link"
+
+
+def link_scheme(link: str) -> str:
+    separator = link.find("://")
+    if separator <= 0:
+        return ""
+    scheme = link[:separator].lower()
+    if all(char.isalnum() or char in "+-." for char in scheme):
+        return scheme
+    return ""
 
 
 def subscription_name_from_url(url: str, sub_id: str) -> str:
@@ -847,7 +911,6 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             yield Footer()
 
         def on_mount(self) -> None:
-            self.refresh_stale_selected_scope()
             self.refresh_layout()
             self.populate_tree()
             self.populate_table()
@@ -1170,13 +1233,23 @@ def textual_key_name(key: str) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         options = parse_tui_args(sys.argv[1:] if argv is None else argv)
+        startup_log(f"using config: {options.config}")
         created = ensure_example_config(options.config)
         if created:
             print_created_config_help(options.config)
             return 0
+        startup_log("loading saved state")
         state = load_state()
+        startup_log("loading config and cached subscriptions")
         config = load_tui_config(options.config, state=state)
+        group_count, subscription_count, config_count = count_tui_config(config)
+        startup_log(f"loaded {group_count} group(s), {subscription_count} subscription(s), {config_count} config(s)")
+        config = startup_refresh_stale_selected_scope(config, state, options)
+        group_count, subscription_count, config_count = count_tui_config(config)
+        startup_log(f"ready with {group_count} group(s), {subscription_count} subscription(s), {config_count} config(s)")
+        startup_log("loading hotkeys")
         hotkeys = load_hotkeys(options.python_config)
+        startup_log("starting TUI")
         return run_textual_app(config, state, options, hotkeys)
     except BrokenPipeError:
         return 1

@@ -104,4 +104,6 @@ xray-tui --socks-port=1080 --http-port=2080
 
 On first run it creates `~/.xray-tui/config.yaml`, prints a short help message, and exits. Edit the YAML, then rerun `xray-tui`. Each subscription is shown as its own subgroup, plus a `Manual configs` subgroup for explicit links and JSON files. Config names are optional: link fragments like `#My%20Node` are URL-decoded, then `host:port` is used as a fallback.
 
+Startup prints progress messages until the Textual screen loads. If the previously selected subscription cache is stale, it is refreshed before the TUI takes over the terminal so slow downloads and large subscription parsing remain visible.
+
 When tmux is available, the active Xray process runs in `--tmux-session=xray-tui-s{SOCKS_PORT}-h{HTTP_PORT}` so you can inspect it with `tmux attach -t xray-tui-s1080-h2080`. By default `xray-tui` stops that process on exit; pass `--no-stop-on-exit` to leave it running.

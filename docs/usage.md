@@ -184,6 +184,8 @@ The UI shows top-level YAML groups. Each subscription becomes its own subgroup, 
 
 Subscriptions are cached under `~/.cache/gost-trier/xray-tui/`. Refresh first tries a direct no-proxy download, then retries with normal `HTTP_PROXY` / `HTTPS_PROXY` environment handling. If refresh fails, the old cache is kept.
 
+During startup, `xray-tui` prints progress messages to stderr until the Textual screen starts. If the previously selected subscription cache is stale, that refresh happens before the TUI takes over the terminal so slow downloads or large subscription parsing are visible instead of looking like a blank-screen hang. Malformed share links from subscriptions are still listed with generated fallback names when possible; they may fail later if selected or tested and the Xray converter rejects them.
+
 The active Xray process uses both listeners:
 
 ```text
