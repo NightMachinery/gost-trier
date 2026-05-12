@@ -49,7 +49,8 @@ def has_listen_args(args: Sequence[str]) -> bool:
     return any(arg == "-L" or arg.startswith("-L=") for arg in args)
 
 
-def run_gost_test(config: Sequence[str], test_urls: Sequence[str], timeout: float) -> dict[str, Any] | None:
+def run_gost_test(config: Sequence[str], test_urls: Sequence[str], timeout: float, verbose: int = 0) -> dict[str, Any] | None:
+    del verbose
     port = free_port()
     test_args = [f"-L=socks5://127.0.0.1:{port}", *strip_listen_args(config)]
     proc = subprocess.Popen(

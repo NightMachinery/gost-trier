@@ -52,6 +52,23 @@ uv run xray-trier --timeout=20s trojan.txt -- -L=socks5://127.0.0.1:1050 -F=MAGI
 xray run -c <temp-file>
 ```
 
+All commands accept repeatable `-v` / `--verbose` flags. For `xray-run` you may put them either before or after the subcommand:
+
+```sh
+uv run xray-run -v json -F='vless://...'
+uv run xray-run json -vvv -L=socks5://127.0.0.1:1060 -F='vless://...'
+uv run xray-trier -vv --timeout=5s trojan.txt -- -F=MAGIC_FILE_1
+uv run gost-trier -v trojan.txt -- -F=MAGIC_FILE_1
+```
+
+Verbosity levels:
+
+1. `-v` prints selected native helper paths, Xray version, and native smoke-test results.
+2. `-vv` also prints subprocess commands, return codes, stdout, and stderr for converter and Xray validation steps.
+3. `-vvv` also prints raw share links and the full generated Xray JSON before validation/execution.
+
+Verbose diagnostics are raw and may include proxy UUIDs, hostnames, generated config, and local paths. On Windows, `xray-run json -vvv ...` is usually the best first command because it validates the generated config without replacing the current process with Xray.
+
 The `xray-run` interface accepts the same `-L` and `-F` shapes used in the examples above. If `-L` is omitted, it picks a free local socks port and logs it to stderr. Multiple `-L` listeners are supported. Xray listeners may be `socks5://`, `socks5h://`, `socks://`, or `http://`; listener username/password auth is supported for HTTP and SOCKS. A missing listener host defaults to `0.0.0.0`, for example:
 
 ```sh

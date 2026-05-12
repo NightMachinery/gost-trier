@@ -48,6 +48,7 @@ class TrierOptions:
     sample: int | None
     run_in_tmux: str | None
     run_top: int
+    verbose: int
 
 
 def parse_duration(value: str) -> float:
@@ -88,6 +89,7 @@ def parse_trier_args(
     parser.add_argument("--sample", type=int, metavar="N", help="randomly sample N expanded configs; implies --shuffle")
     parser.add_argument("--run-in-tmux", metavar="SESSION", help="launch the fastest working configs in this tmux session")
     parser.add_argument("--run-top", type=int, default=1, help="number of working configs to launch with --run-in-tmux")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="increase diagnostic output; repeat for more detail")
 
     if "--" not in argv:
         parser.parse_args(argv)
@@ -120,6 +122,7 @@ def parse_trier_args(
         sample=namespace.sample,
         run_in_tmux=namespace.run_in_tmux,
         run_top=namespace.run_top,
+        verbose=namespace.verbose,
     )
 
 
@@ -297,7 +300,7 @@ def is_successful_test(test: dict[str, Any]) -> bool:
     return test.get("result") == "ok"
 
 
-TestRunner = Callable[[Sequence[str], Sequence[str], float], dict[str, Any] | None]
+TestRunner = Callable[[Sequence[str], Sequence[str], float, int], dict[str, Any] | None]
 TmuxRunner = Callable[[str, Sequence[dict[str, Any]], int], None]
 
 
@@ -329,7 +332,7 @@ def run_trier(
         for index, config in enumerate(configs, start=1):
             print(f"[{index}/{total}] testing", file=sys.stderr)
             try:
-                result = run_test(config, options.test_urls, options.timeout)
+                result = run_test(config, options.test_urls, options.timeout, options.verbose)
             except Exception as exc:
                 print(f"[{index}/{total}] skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
                 continue
@@ -365,7 +368,7 @@ def run_parallel_tests(
                 index, config = next(indexed_configs)
             except StopIteration:
                 break
-            future_to_index[executor.submit(run_test, config, options.test_urls, options.timeout)] = index
+            future_to_index[executor.submit(run_test, config, options.test_urls, options.timeout, options.verbose)] = index
 
         while future_to_index:
             for future in as_completed(future_to_index):
@@ -388,7 +391,7 @@ def run_parallel_tests(
                     next_index, next_config = next(indexed_configs)
                 except StopIteration:
                     continue
-                future_to_index[executor.submit(run_test, next_config, options.test_urls, options.timeout)] = next_index
+                future_to_index[executor.submit(run_test, next_config, options.test_urls, options.timeout, options.verbose)] = next_index
             if stop:
                 for pending in future_to_index:
                     pending.cancel()

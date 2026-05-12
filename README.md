@@ -44,6 +44,12 @@ This installs `gost-trier`, `xray-trier`, and `xray-run`.
 
 `xray-run` and `xray-trier` auto-bootstrap native helpers when needed. They first use binaries already on `PATH`, then download cached release binaries for Xray and `Xray-Link-Json` under `~/.cache/gost-trier/bin/`. `Xray-Link-Json` falls back to `go install` only if the release download is not available. Advanced users can override these paths with `XRAY_BIN` and `XRAY_LINK_JSON`.
 
+For native helper problems, add repeatable `-v` flags. `-v` prints selected helper paths, versions, and smoke-test results; `-vv` also prints subprocess commands, return codes, stdout, and stderr; `-vvv` prints raw share links and the full generated Xray JSON. The verbose output is intentionally unredacted.
+
+```powershell
+xray-run json -vvv -L=socks5://127.0.0.1:1060 -L=http://127.0.0.1:2060 -F='vless://...'
+```
+
 To upgrade later, `uv tool upgrade` uses `uv`'s recorded tool requirement:
 
 ```sh

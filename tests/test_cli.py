@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import subprocess
 
 import pytest
 import socksio
@@ -31,6 +32,7 @@ from gost_trier.xray import (
     XrayArgs,
     build_xray_config,
     build_inbound,
+    convert_link_to_outbounds,
     listener_curl_command,
     listener_proxy_url,
     normalize_outbound,
@@ -39,6 +41,10 @@ from gost_trier.xray import (
     parse_xray_args,
     print_xray_tmux_launch_info,
     run_xray_in_tmux,
+    smoke_test_converter,
+    smoke_test_xray,
+    validate_xray_config,
+    xray_run_main,
     xray_tmux_command,
 )
 from gost_trier.native import (
@@ -87,6 +93,12 @@ def test_parse_trier_args_accepts_enough_delay_and_sample():
     assert options.enough_delay_ms == 750
     assert options.sample == 10
     assert options.shuffle
+
+
+def test_parse_trier_args_accepts_repeatable_verbose():
+    options = parse_trier_args(["-vv", "trojan.txt", "--", "-F=MAGIC_FILE_1"], prog="xray-trier", description="test")
+
+    assert options.verbose == 2
 
 
 def test_parse_trier_args_preserves_url_sources():
@@ -253,7 +265,8 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
     def fake_substitute(args, values):
         return [values[0]]
 
-    def fake_run_test(config, test_urls, timeout):
+    def fake_run_test(config, test_urls, timeout, verbose=0):
+        assert verbose == 2
         calls.append(config)
         return {"best-delay-ms": 100, "config": config, "tests": []}
 
@@ -268,6 +281,7 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
         sample=None,
         run_in_tmux=None,
         run_top=1,
+        verbose=2,
     )
 
     def fake_read_candidate_files(files, shuffle):
@@ -404,8 +418,97 @@ def test_parse_converter_json_ignores_surrounding_output():
     assert parse_converter_json('warn\n{"outbounds": []}\nextra') == {"outbounds": []}
 
 
+def test_convert_link_failure_includes_verbose_subprocess_details(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 9, stdout="converter stdout", stderr="converter stderr")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(ValueError) as exc_info:
+        convert_link_to_outbounds("vless://bad", converter=["Xray-Link-Json"], verbose=2)
+
+    message = str(exc_info.value)
+    assert "Xray-Link-Json failed to convert one forward" in message
+    assert "return code: 9" in message
+    assert "converter stdout" in message
+    assert "converter stderr" in message
+
+
+def test_validate_xray_config_failure_includes_validator_output(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 23, stdout="validator stdout", stderr="validator stderr")
+
+    monkeypatch.setattr("gost_trier.xray.ensure_xray_dependency", lambda verbose=0: "xray")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_xray_config({"outbounds": [{"protocol": "freedom", "settings": {}}]}, verbose=2)
+
+    message = str(exc_info.value)
+    assert "generated Xray config failed validation" in message
+    assert "xray run -test -c" in message
+    assert "validator stdout" in message
+    assert "validator stderr" in message
+
+
+def test_xray_run_main_passes_subcommand_verbose(monkeypatch, capsys):
+    seen = {}
+
+    def fake_xray_run_json(args, validate=True, verbose=0):
+        seen["args"] = args
+        seen["verbose"] = verbose
+        return {"log": {"loglevel": "warning"}, "inbounds": [], "outbounds": []}
+
+    monkeypatch.setattr("gost_trier.xray.xray_run_json", fake_xray_run_json)
+
+    assert xray_run_main(["json", "-vvv", "-F=direct://"]) == 0
+    assert seen == {"args": ["-F=direct://"], "verbose": 3}
+    assert '"outbounds": []' in capsys.readouterr().out
+
+
+def test_xray_run_main_counts_global_verbose(monkeypatch):
+    seen = {}
+
+    def fake_xray_run_json(args, validate=True, verbose=0):
+        seen["verbose"] = verbose
+        return {}
+
+    monkeypatch.setattr("gost_trier.xray.xray_run_json", fake_xray_run_json)
+
+    assert xray_run_main(["-v", "json", "-v", "-F=direct://"]) == 0
+    assert seen["verbose"] == 2
+
+
+def test_xray_dependency_smoke_test_checks_version_and_config(monkeypatch):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[1] == "version":
+            return subprocess.CompletedProcess(command, 0, stdout="Xray test-version\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="Configuration OK.\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("gost_trier.xray._SMOKE_CHECKED", set())
+
+    smoke_test_xray("xray", verbose=1)
+
+    assert [command[:2] for command in commands] == [["xray", "version"], ["xray", "run"]]
+
+
+def test_converter_smoke_test_requires_outbounds(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout='{"outbounds":[]}', stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("gost_trier.xray._SMOKE_CHECKED", set())
+
+    with pytest.raises(RuntimeError, match="did not emit outbounds"):
+        smoke_test_converter(["Xray-Link-Json"], verbose=1)
+
+
 def test_build_xray_config_chains_outbounds(monkeypatch):
-    def fake_convert(link, converter=None):
+    def fake_convert(link, converter=None, verbose=0):
         return [{"protocol": "freedom", "settings": {"link": link}, "sendThrough": "ignored"}]
 
     monkeypatch.setattr("gost_trier.xray.convert_link_to_outbounds", fake_convert)
@@ -422,7 +525,7 @@ def test_build_xray_config_chains_outbounds(monkeypatch):
 
 
 def test_build_xray_config_creates_multiple_inbounds(monkeypatch):
-    def fake_convert(link, converter=None):
+    def fake_convert(link, converter=None, verbose=0):
         return [{"protocol": "freedom", "settings": {"link": link}}]
 
     monkeypatch.setattr("gost_trier.xray.convert_link_to_outbounds", fake_convert)
