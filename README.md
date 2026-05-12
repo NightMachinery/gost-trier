@@ -44,6 +44,8 @@ This installs `gost-trier`, `xray-trier`, and `xray-run`.
 
 `xray-run` and `xray-trier` auto-bootstrap native helpers when needed. They first use binaries already on `PATH`, then download cached release binaries for Xray and `Xray-Link-Json` under `~/.cache/gost-trier/bin/`. `Xray-Link-Json` falls back to `go install` only if the release download is not available. Advanced users can override these paths with `XRAY_BIN` and `XRAY_LINK_JSON`.
 
+`xray-trier` performs Xray and `Xray-Link-Json` setup checks once before launching parallel config tests, so high `--jobs` values do not repeat native smoke tests for every sampled config.
+
 To upgrade later, `uv tool upgrade` uses `uv`'s recorded tool requirement:
 
 ```sh

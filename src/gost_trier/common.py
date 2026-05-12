@@ -99,7 +99,7 @@ def parse_trier_args(
 
     separator = list(argv).index("--")
     app_argv = list(argv[:separator])
-    runner_args = list(argv[separator + 1 :])
+    runner_args = normalize_split_url_args(argv[separator + 1 :])
     namespace = parser.parse_args(app_argv)
 
     if not runner_args:
@@ -127,6 +127,20 @@ def parse_trier_args(
         verbose=namespace.verbose,
         output=namespace.output,
     )
+
+
+def normalize_split_url_args(args: Sequence[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if index + 1 < len(args) and arg.endswith(":") and args[index + 1].startswith("//"):
+            normalized.append(arg + args[index + 1])
+            index += 2
+            continue
+        normalized.append(arg)
+        index += 1
+    return normalized
 
 
 def read_candidate_files(paths: Sequence[str], shuffle: bool) -> list[list[str]]:
@@ -305,6 +319,7 @@ def is_successful_test(test: dict[str, Any]) -> bool:
 
 TestRunner = Callable[[Sequence[str], Sequence[str], float, int], dict[str, Any] | None]
 TmuxRunner = Callable[[str, Sequence[dict[str, Any]], int], None]
+PreflightRunner = Callable[[TrierOptions], None]
 
 
 def run_trier(
@@ -313,6 +328,7 @@ def run_trier(
     substitute: Callable[[Sequence[str], Sequence[str]], list[str]],
     run_test: TestRunner,
     run_tmux: TmuxRunner,
+    preflight: PreflightRunner | None = None,
 ) -> int:
     candidates = read_candidate_files(options.files, options.shuffle)
     total = 1
@@ -328,6 +344,9 @@ def run_trier(
         total = sampled_total
     else:
         print(f"Testing {total} config(s) with jobs={options.jobs}", file=sys.stderr)
+
+    if preflight is not None:
+        preflight(options)
 
     if options.jobs != 1:
         results.extend(run_parallel_tests(configs, total, options, run_test))

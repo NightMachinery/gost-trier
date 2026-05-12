@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from .common import parse_trier_args, run_trier
 from .placeholders import substitute_placeholders
-from .xray import run_xray_in_tmux, run_xray_test
+from .xray import preflight_xray_trier, run_xray_in_tmux, run_xray_test
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -21,6 +21,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             substitute=substitute_placeholders,
             run_test=run_xray_test,
             run_tmux=run_xray_in_tmux,
+            preflight=preflight_xray_trier,
         )
     except BrokenPipeError:
         return 1

@@ -18,7 +18,15 @@ from threading import Lock
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-from .common import free_port, is_successful_test, test_url, wait_for_port, write_json_output
+from .common import (
+    TrierOptions,
+    free_port,
+    is_successful_test,
+    normalize_split_url_args,
+    test_url,
+    wait_for_port,
+    write_json_output,
+)
 from .diagnostics import completed_process_details, dump_json_for_debug, run_logged, verbose_log
 from .gost import ensure_tmux_session, strip_listen_args
 from .native import locate_xray, locate_xray_link_json
@@ -31,6 +39,10 @@ _CONVERTED_LINK_CACHE: dict[str, list[dict[str, Any]]] = {}
 _CONVERTED_LINK_CACHE_LOCK = Lock()
 _SMOKE_CHECKED: set[tuple[str, str]] = set()
 _SMOKE_CHECK_LOCK = Lock()
+_XRAY_BIN_CACHE: str | None = None
+_XRAY_BIN_CACHE_LOCK = Lock()
+_CONVERTER_COMMAND_CACHE: list[str] | None = None
+_CONVERTER_COMMAND_CACHE_LOCK = Lock()
 CONVERTER_SMOKE_LINK = (
     "vless://00000000-0000-0000-0000-000000000000@example.com:443"
     "?security=tls&type=tcp&sni=example.com#smoke"
@@ -53,6 +65,7 @@ class XrayArgs:
 
 
 def parse_xray_args(args: Sequence[str], *, auto_listen: bool = True) -> XrayArgs:
+    args = normalize_split_url_args(args)
     listens: list[Listen] = []
     forwards: list[str] = []
     index = 0
@@ -100,35 +113,37 @@ def parse_listen(value: str) -> Listen:
 
 
 def locate_converter(verbose: int = 0) -> list[str]:
+    global _CONVERTER_COMMAND_CACHE
+    with _CONVERTER_COMMAND_CACHE_LOCK:
+        if _CONVERTER_COMMAND_CACHE is not None:
+            return list(_CONVERTER_COMMAND_CACHE)
+        command = resolve_converter_command(verbose=verbose)
+        smoke_test_converter(command, verbose=verbose)
+        _CONVERTER_COMMAND_CACHE = list(command)
+        return list(command)
+
+
+def resolve_converter_command(verbose: int = 0) -> list[str]:
     env_path = os.environ.get("XRAY_LINK_JSON")
     if env_path:
-        command = [env_path]
         verbose_log(verbose, 1, f"using Xray-Link-Json from XRAY_LINK_JSON: {env_path}")
-        smoke_test_converter(command, verbose=verbose)
-        return command
+        return [env_path]
     path_binary = shutil.which("Xray-Link-Json")
     if path_binary:
-        command = [path_binary]
         verbose_log(verbose, 1, f"using Xray-Link-Json from PATH: {path_binary}")
-        smoke_test_converter(command, verbose=verbose)
-        return command
+        return [path_binary]
     try:
         command = [str(locate_xray_link_json())]
         verbose_log(verbose, 1, f"using cached/downloaded Xray-Link-Json: {command[0]}")
-        smoke_test_converter(command, verbose=verbose)
         return command
     except Exception as release_exc:
         print(f"xray-run: release install for Xray-Link-Json failed: {release_exc}", file=sys.stderr)
     install_converter()
     path_binary = shutil.which("Xray-Link-Json")
     if path_binary:
-        command = [path_binary]
-        smoke_test_converter(command, verbose=verbose)
-        return command
+        return [path_binary]
     if DEFAULT_CONVERTER_CACHE.exists():
-        command = [str(DEFAULT_CONVERTER_CACHE)]
-        smoke_test_converter(command, verbose=verbose)
-        return command
+        return [str(DEFAULT_CONVERTER_CACHE)]
     if (DEFAULT_CONVERTER_CLONE / "go.mod").exists():
         DEFAULT_CONVERTER_CACHE.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
@@ -140,9 +155,7 @@ def locate_converter(verbose: int = 0) -> list[str]:
             text=True,
             errors="replace",
         )
-        command = [str(DEFAULT_CONVERTER_CACHE)]
-        smoke_test_converter(command, verbose=verbose)
-        return command
+        return [str(DEFAULT_CONVERTER_CACHE)]
     raise FileNotFoundError("Xray-Link-Json not found; set XRAY_LINK_JSON or install it on PATH")
 
 
@@ -375,12 +388,18 @@ def run_xray_test(config_args: Sequence[str], test_urls: Sequence[str], timeout:
         Path(temp.name).unlink(missing_ok=True)
 
 
+def preflight_xray_trier(options: TrierOptions) -> None:
+    ensure_xray_dependency(verbose=options.verbose)
+    locate_converter(verbose=options.verbose)
+
+
 def xray_tmux_command(session: str, window: str, config: Sequence[str]) -> list[str]:
     command = " ".join(shlex.quote(part) for part in ["xray-run", "exec", *config])
     return ["tmux", "new-window", "-t", session, "-n", window, command]
 
 
 def has_listen_args(args: Sequence[str]) -> bool:
+    args = normalize_split_url_args(args)
     return any(arg == "-L" or arg.startswith("-L=") for arg in args)
 
 
@@ -461,7 +480,7 @@ If no -F is provided, direct:// is used.
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     namespace, runner_args = parser.parse_known_args(raw_argv)
     namespace.verbose = max(namespace.verbose, count_verbose_flags(raw_argv))
-    runner_args = list(runner_args)
+    runner_args = normalize_split_url_args(runner_args)
     if runner_args and runner_args[0] == "--":
         runner_args = runner_args[1:]
     try:
@@ -514,10 +533,13 @@ def count_verbose_flags(argv: Sequence[str]) -> int:
 
 
 def ensure_xray_dependency(*, verbose: int = 0) -> str:
-    xray_bin = str(locate_xray())
-    verbose_log(verbose, 1, f"using Xray: {xray_bin}")
-    smoke_test_xray(xray_bin, verbose=verbose)
-    return xray_bin
+    global _XRAY_BIN_CACHE
+    with _XRAY_BIN_CACHE_LOCK:
+        if _XRAY_BIN_CACHE is None:
+            _XRAY_BIN_CACHE = str(locate_xray())
+            verbose_log(verbose, 1, f"using Xray: {_XRAY_BIN_CACHE}")
+            smoke_test_xray(_XRAY_BIN_CACHE, verbose=verbose)
+        return _XRAY_BIN_CACHE
 
 
 def smoke_test_xray(xray_bin: str, *, verbose: int = 0) -> None:
@@ -525,25 +547,24 @@ def smoke_test_xray(xray_bin: str, *, verbose: int = 0) -> None:
     with _SMOKE_CHECK_LOCK:
         if key in _SMOKE_CHECKED:
             return
-    version = run_logged([xray_bin, "version"], verbose=verbose)
-    if version.returncode != 0:
-        raise RuntimeError(f"Xray version check failed\n{completed_process_details(version, command=[xray_bin, 'version'])}")
-    if verbose >= 1:
-        first_line = (version.stdout or version.stderr).splitlines()[0] if (version.stdout or version.stderr) else "unknown"
-        verbose_log(verbose, 1, f"Xray version: {first_line}")
+        version = run_logged([xray_bin, "version"], verbose=verbose)
+        if version.returncode != 0:
+            raise RuntimeError(f"Xray version check failed\n{completed_process_details(version, command=[xray_bin, 'version'])}")
+        if verbose >= 1:
+            first_line = (version.stdout or version.stderr).splitlines()[0] if (version.stdout or version.stderr) else "unknown"
+            verbose_log(verbose, 1, f"Xray version: {first_line}")
 
-    config = {"log": {"loglevel": "warning"}, "inbounds": [], "outbounds": [{"protocol": "freedom", "settings": {}}]}
-    config_path = write_temp_xray_config(config, prefix="xray-run-smoke-")
-    try:
-        command = [xray_bin, "run", "-test", "-c", str(config_path)]
-        completed = run_logged(command, verbose=verbose)
-    finally:
-        config_path.unlink(missing_ok=True)
-    if completed.returncode != 0:
-        raise RuntimeError(f"Xray smoke test failed\n{completed_process_details(completed, command=command)}")
-    with _SMOKE_CHECK_LOCK:
+        config = {"log": {"loglevel": "warning"}, "inbounds": [], "outbounds": [{"protocol": "freedom", "settings": {}}]}
+        config_path = write_temp_xray_config(config, prefix="xray-run-smoke-")
+        try:
+            command = [xray_bin, "run", "-test", "-c", str(config_path)]
+            completed = run_logged(command, verbose=verbose)
+        finally:
+            config_path.unlink(missing_ok=True)
+        if completed.returncode != 0:
+            raise RuntimeError(f"Xray smoke test failed\n{completed_process_details(completed, command=command)}")
         _SMOKE_CHECKED.add(key)
-    verbose_log(verbose, 1, "Xray smoke test passed")
+        verbose_log(verbose, 1, "Xray smoke test passed")
 
 
 def write_temp_xray_config(config: dict[str, Any], *, prefix: str) -> Path:
@@ -558,15 +579,14 @@ def smoke_test_converter(command: Sequence[str], *, verbose: int = 0) -> None:
     with _SMOKE_CHECK_LOCK:
         if key in _SMOKE_CHECKED:
             return
-    if verbose >= 3:
-        verbose_log(verbose, 3, f"converter smoke link: {CONVERTER_SMOKE_LINK}")
-    completed = run_logged([*command, CONVERTER_SMOKE_LINK], verbose=verbose)
-    if completed.returncode != 0:
-        raise RuntimeError(f"Xray-Link-Json smoke test failed\n{completed_process_details(completed, command=[*command, CONVERTER_SMOKE_LINK])}")
-    payload = parse_converter_json(completed.stdout)
-    outbounds = payload.get("outbounds")
-    if not isinstance(outbounds, list) or not outbounds:
-        raise RuntimeError("Xray-Link-Json smoke test did not emit outbounds")
-    with _SMOKE_CHECK_LOCK:
+        if verbose >= 3:
+            verbose_log(verbose, 3, f"converter smoke link: {CONVERTER_SMOKE_LINK}")
+        completed = run_logged([*command, CONVERTER_SMOKE_LINK], verbose=verbose)
+        if completed.returncode != 0:
+            raise RuntimeError(f"Xray-Link-Json smoke test failed\n{completed_process_details(completed, command=[*command, CONVERTER_SMOKE_LINK])}")
+        payload = parse_converter_json(completed.stdout)
+        outbounds = payload.get("outbounds")
+        if not isinstance(outbounds, list) or not outbounds:
+            raise RuntimeError("Xray-Link-Json smoke test did not emit outbounds")
         _SMOKE_CHECKED.add(key)
-    verbose_log(verbose, 1, "Xray-Link-Json smoke test passed")
+        verbose_log(verbose, 1, "Xray-Link-Json smoke test passed")

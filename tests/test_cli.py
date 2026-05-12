@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from gost_trier.common import (
     decode_base64_if_needed,
     expand_configs,
     is_http_url,
+    normalize_split_url_args,
     parse_duration,
     parse_trier_args,
     progress_message,
@@ -40,8 +43,10 @@ from gost_trier.xray import (
     parse_listen,
     parse_converter_json,
     parse_xray_args,
+    preflight_xray_trier,
     print_xray_tmux_launch_info,
     run_xray_in_tmux,
+    run_xray_test,
     smoke_test_converter,
     smoke_test_xray,
     validate_xray_config,
@@ -72,6 +77,16 @@ def test_parse_args_strips_separator_and_defaults():
     assert options.timeout == 20.0
     assert options.jobs == 1
     assert options.output == "-"
+
+
+def test_parse_trier_args_normalizes_shell_split_runner_urls():
+    options = parse_trier_args(
+        ["trojan.txt", "--", "-L=socks5:", "//127.0.0.1:1050", "-F=MAGIC_FILE_1"],
+        prog="xray-trier",
+        description="test",
+    )
+
+    assert options.runner_args == ["-L=socks5://127.0.0.1:1050", "-F=MAGIC_FILE_1"]
 
 
 def test_parse_trier_args_accepts_custom_default_jobs():
@@ -175,6 +190,17 @@ def test_listen_args_extracts_joined_and_split_forms():
         "socks5://127.0.0.1:1080",
         "http://127.0.0.1:2080",
     ]
+
+
+def test_normalize_split_url_args_joins_shell_split_urls():
+    assert normalize_split_url_args(["-L=socks5:", "//127.0.0.1:1080", "-F=vless:", "//example.com"]) == [
+        "-L=socks5://127.0.0.1:1080",
+        "-F=vless://example.com",
+    ]
+
+
+def test_strip_listen_args_removes_shell_split_listener_tail():
+    assert strip_listen_args(["-L=socks5:", "//127.0.0.1:1080", "-F=direct://"]) == ["-F=direct://"]
 
 
 def test_gost_listener_curl_command_uses_listener_scheme():
@@ -348,6 +374,43 @@ def test_run_trier_writes_output_file_and_creates_parent_dirs(tmp_path, capsys):
     assert output.read_text() == '[\n  {\n    "best-delay-ms": 100,\n    "config": [\n      "a"\n    ],\n    "tests": []\n  }\n]\n'
 
 
+def test_run_trier_runs_preflight_before_parallel_workers(capsys):
+    events = []
+    options = TrierOptions(
+        files=[],
+        runner_args=["-F=MAGIC_FILE_1"],
+        test_urls=["https://example.com"],
+        shuffle=False,
+        timeout=1,
+        jobs=2,
+        enough_delay_ms=None,
+        sample=None,
+        run_in_tmux=None,
+        run_top=1,
+        verbose=0,
+        output="-",
+    )
+
+    import gost_trier.common as common
+
+    original = common.read_candidate_files
+    common.read_candidate_files = lambda files, shuffle: [["a", "b"]]
+    try:
+        run_trier(
+            options,
+            substitute=lambda args, values: [values[0]],
+            run_test=lambda config, test_urls, timeout, verbose=0: events.append(("worker", config)) or None,
+            run_tmux=lambda session, results, top: None,
+            preflight=lambda seen_options: events.append(("preflight", seen_options.jobs)),
+        )
+    finally:
+        common.read_candidate_files = original
+
+    assert events[0] == ("preflight", 2)
+    assert {event[0] for event in events[1:]} == {"worker"}
+    assert capsys.readouterr().out == "[]\n"
+
+
 def test_progress_message_prints_success_or_failure_and_delay():
     assert progress_message(1, 3, None) == "[1/3] fail"
     assert progress_message(2, 3, {"best-delay-ms": 123}) == "[2/3] success 123 ms"
@@ -366,6 +429,26 @@ def test_parse_xray_args_accepts_gost_like_flags():
 
     assert parsed.listens == [parse_listen("socks5://127.0.0.1:1050")]
     assert parsed.forwards == ["first", "second"]
+
+
+def test_parse_xray_args_accepts_shell_split_urls():
+    parsed = parse_xray_args(["-L=socks5:", "//127.0.0.1:1050", "-F=vless:", "//example.com"], auto_listen=False)
+
+    assert parsed.listens == [parse_listen("socks5://127.0.0.1:1050")]
+    assert parsed.forwards == ["vless://example.com"]
+
+
+def test_xray_run_main_normalizes_shell_split_urls(monkeypatch):
+    seen = {}
+
+    def fake_xray_run_json(args, validate=True, verbose=0):
+        seen["args"] = args
+        return {"outbounds": []}
+
+    monkeypatch.setattr("gost_trier.xray.xray_run_json", fake_xray_run_json)
+
+    assert xray_run_main(["json", "-L=socks5:", "//127.0.0.1:1050", "-F=direct://"]) == 0
+    assert seen["args"] == ["-L=socks5://127.0.0.1:1050", "-F=direct://"]
 
 
 def test_parse_xray_args_accepts_multiple_listeners():
@@ -517,6 +600,47 @@ def test_validate_xray_config_closes_temp_file_before_xray_reads_it(monkeypatch)
     assert not seen_paths[0].exists()
 
 
+def test_run_xray_test_strips_shell_split_original_listeners(monkeypatch):
+    seen = {}
+
+    monkeypatch.setattr("gost_trier.xray.free_port", lambda: 34567)
+    monkeypatch.setattr("gost_trier.xray.ensure_xray_dependency", lambda verbose=0: "xray")
+
+    def fake_xray_run_json(args, validate=True, verbose=0):
+        seen["args"] = args
+        raise ValueError("stop after setup args")
+
+    monkeypatch.setattr("gost_trier.xray.xray_run_json", fake_xray_run_json)
+
+    assert run_xray_test(["-L=socks5:", "//127.0.0.1:1080", "-F=direct://"], ["https://example.com"], 1) is None
+    assert seen["args"] == ["-L=socks5://127.0.0.1:34567", "-F=direct://"]
+
+
+def test_preflight_xray_trier_resolves_xray_and_converter(monkeypatch):
+    calls = []
+    options = TrierOptions(
+        files=[],
+        runner_args=["-F=MAGIC_FILE_1"],
+        test_urls=["https://example.com"],
+        shuffle=False,
+        timeout=1,
+        jobs=50,
+        enough_delay_ms=None,
+        sample=None,
+        run_in_tmux=None,
+        run_top=1,
+        verbose=3,
+        output="-",
+    )
+
+    monkeypatch.setattr("gost_trier.xray.ensure_xray_dependency", lambda verbose=0: calls.append(("xray", verbose)) or "xray")
+    monkeypatch.setattr("gost_trier.xray.locate_converter", lambda verbose=0: calls.append(("converter", verbose)) or ["Xray-Link-Json"])
+
+    preflight_xray_trier(options)
+
+    assert calls == [("xray", 3), ("converter", 3)]
+
+
 def test_xray_run_main_passes_subcommand_verbose(monkeypatch, capsys):
     seen = {}
 
@@ -586,6 +710,25 @@ def test_xray_dependency_smoke_test_checks_version_and_config(monkeypatch):
     assert not seen_paths[0].exists()
 
 
+def test_xray_dependency_smoke_test_runs_once_for_concurrent_callers(monkeypatch):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        time.sleep(0.01)
+        if command[1] == "version":
+            return subprocess.CompletedProcess(command, 0, stdout="Xray test-version\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="Configuration OK.\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("gost_trier.xray._SMOKE_CHECKED", set())
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda _: smoke_test_xray("xray", verbose=1), range(8)))
+
+    assert [command[:2] for command in commands] == [["xray", "version"], ["xray", "run"]]
+
+
 def test_converter_smoke_test_requires_outbounds(monkeypatch):
     def fake_run(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, stdout='{"outbounds":[]}', stderr="")
@@ -595,6 +738,23 @@ def test_converter_smoke_test_requires_outbounds(monkeypatch):
 
     with pytest.raises(RuntimeError, match="did not emit outbounds"):
         smoke_test_converter(["Xray-Link-Json"], verbose=1)
+
+
+def test_converter_smoke_test_runs_once_for_concurrent_callers(monkeypatch):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        time.sleep(0.01)
+        return subprocess.CompletedProcess(command, 0, stdout='{"outbounds":[{"protocol":"freedom"}]}', stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("gost_trier.xray._SMOKE_CHECKED", set())
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda _: smoke_test_converter(["Xray-Link-Json"], verbose=1), range(8)))
+
+    assert commands == [["Xray-Link-Json", "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=tcp&sni=example.com#smoke"]]
 
 
 def test_build_xray_config_chains_outbounds(monkeypatch):

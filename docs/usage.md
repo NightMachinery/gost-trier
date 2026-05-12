@@ -97,6 +97,8 @@ Xray itself is discovered in this order:
 2. `xray` on `PATH`
 3. cached or downloaded GitHub release binaries from `XTLS/Xray-core`
 
+`xray-trier` runs Xray and `Xray-Link-Json` resolution plus native smoke checks once before starting parallel config tests. The checks are cached for the rest of the process, including direct `xray-run` setup calls.
+
 For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order.
 
 If no `-F` is provided to `xray-run`, it uses a direct connection (`direct://` / Xray `freedom` outbound).

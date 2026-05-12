@@ -10,11 +10,12 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-from .common import free_port, is_successful_test, test_url, wait_for_port
+from .common import free_port, is_successful_test, normalize_split_url_args, test_url, wait_for_port
 from .sessions import run_managed_session
 
 
 def strip_listen_args(args: Sequence[str]) -> list[str]:
+    args = normalize_split_url_args(args)
     stripped: list[str] = []
     skip_next = False
     for arg in args:
@@ -31,6 +32,7 @@ def strip_listen_args(args: Sequence[str]) -> list[str]:
 
 
 def listen_args(args: Sequence[str]) -> list[str]:
+    args = normalize_split_url_args(args)
     listens: list[str] = []
     skip_next = False
     for arg in args:
@@ -46,6 +48,7 @@ def listen_args(args: Sequence[str]) -> list[str]:
 
 
 def has_listen_args(args: Sequence[str]) -> bool:
+    args = normalize_split_url_args(args)
     return any(arg == "-L" or arg.startswith("-L=") for arg in args)
 
 
