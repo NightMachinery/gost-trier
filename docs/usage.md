@@ -110,6 +110,8 @@ Normal `xray-run` and `xray-trier` startup uses an explicit environment override
 
 For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order. Chained outbounds set `transportLayer: true` so each outbound keeps its `streamSettings` when it dials through the next outbound.
 
+`-F` can also point to a local JSON file. The file may be a raw outbound object with `protocol`, or a full Xray config with `outbounds`. A single JSON `-F` may contain multiple outbounds. When that JSON file is part of a chain with other `-F` values, it must contain exactly one outbound so chain order is unambiguous.
+
 If no `-F` is provided to `xray-run`, it uses a direct connection (`direct://` / Xray `freedom` outbound).
 
 `xray-trier` defaults to `--jobs=50`; `gost-trier` defaults to `--jobs=1`. Both commands default to trying `https://api.ipify.org` first, then `https://myip.wtf/json`.
@@ -169,6 +171,10 @@ If the YAML config is missing, `xray-tui` creates `~/.xray-tui/config.yaml` and 
 
 ```yaml
 groups:
+  - name: chained
+    proxy_chain: shared-chain
+    configs:
+      - link: direct://
   - name: default
     subscriptions:
       - url: https://example.com/sub.txt
@@ -178,9 +184,17 @@ groups:
       - link: direct://
       - link: vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#decoded%20name
       - path: ~/xray-configs/example.json
+
+proxy_chains:
+  - name: shared-chain
+    chain:
+      - link: socks5://127.0.0.1:10050
+      - path: ~/xray-configs/single-outbound.json
 ```
 
 The UI shows top-level YAML groups. Each subscription becomes its own subgroup, and explicit `configs` are shown under `Manual configs`. Config `name` fields are optional. For share links, `xray-tui` uses the URL-decoded fragment after `#`, then `host:port`, then a stable generated name. The table also shows each config protocol from the link scheme, or from the first JSON outbound protocol for file configs.
+
+Groups can set `proxy_chain` to a named chain from top-level `proxy_chains`, or to an inline list of chain entries. When a chain is configured, selected configs, restart, tests, and auto-rotate all use `selected config -> chain entries in order -> internet`. Chain entries may be links or JSON paths. JSON paths inside a chain must contain exactly one outbound; unchained selected JSON configs keep their full-config behavior.
 
 Subscriptions are cached under `~/.cache/gost-trier/xray-tui/`. Refresh first tries a direct no-proxy download, then retries with normal `HTTP_PROXY` / `HTTPS_PROXY` environment handling. If refresh fails, the old cache is kept.
 

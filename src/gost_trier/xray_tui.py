@@ -123,6 +123,12 @@ class ConfigItem:
 
 
 @dataclass(frozen=True)
+class ProxyChain:
+    name: str | None
+    items: list[ConfigItem]
+
+
+@dataclass(frozen=True)
 class Subscription:
     id: str
     name: str
@@ -146,6 +152,7 @@ class ConfigGroup:
     id: str
     name: str
     subgroups: list[Subgroup]
+    proxy_chain: ProxyChain | None = None
 
 
 @dataclass(frozen=True)
@@ -260,9 +267,13 @@ def load_tui_config(path: Path, *, state: TuiState | None = None) -> TuiConfig:
     if not isinstance(loaded, dict):
         raise ValueError("config YAML must be a mapping")
     raw_groups = loaded.get("groups", [])
+    raw_proxy_chains = loaded.get("proxy_chains", [])
+    if not isinstance(raw_proxy_chains, list):
+        raise ValueError("config field 'proxy_chains' must be a list")
     if not isinstance(raw_groups, list):
         raise ValueError("config field 'groups' must be a list")
-    groups = [parse_group(raw_group, index, state=state) for index, raw_group in enumerate(raw_groups, start=1)]
+    proxy_chains = parse_proxy_chains(raw_proxy_chains)
+    groups = [parse_group(raw_group, index, state=state, proxy_chains=proxy_chains) for index, raw_group in enumerate(raw_groups, start=1)]
     return TuiConfig(groups=groups)
 
 
@@ -305,17 +316,42 @@ def startup_refresh_stale_selected_scope(config: TuiConfig, state: TuiState, opt
     return load_tui_config(options.config, state=state)
 
 
-def parse_group(raw: Any, index: int, *, state: TuiState | None) -> ConfigGroup:
+def parse_proxy_chains(raw_proxy_chains: Sequence[Any]) -> dict[str, ProxyChain]:
+    proxy_chains: dict[str, ProxyChain] = {}
+    for index, raw_chain in enumerate(raw_proxy_chains, start=1):
+        if not isinstance(raw_chain, dict):
+            raise ValueError(f"proxy chain #{index} must be a mapping")
+        name = string_field(raw_chain, "name")
+        if not name:
+            raise ValueError(f"proxy chain #{index} is missing name")
+        if name in proxy_chains:
+            raise ValueError(f"duplicate proxy chain name: {name}")
+        raw_items = raw_chain.get("chain", [])
+        proxy_chains[name] = ProxyChain(name=name, items=parse_proxy_chain_items(raw_items, f"proxy chain {name!r}"))
+    return proxy_chains
+
+
+def parse_proxy_chain_items(raw_items: Any, source: str) -> list[ConfigItem]:
+    if not isinstance(raw_items, list):
+        raise ValueError(f"{source} field 'chain' must be a list")
+    if not raw_items:
+        raise ValueError(f"{source} must contain at least one proxy")
+    return [parse_config_item(raw_item, f"{source}:chain", item_index, source=source) for item_index, raw_item in enumerate(raw_items, start=1)]
+
+
+def parse_group(raw: Any, index: int, *, state: TuiState | None, proxy_chains: Mapping[str, ProxyChain] | None = None) -> ConfigGroup:
     if not isinstance(raw, dict):
         raise ValueError(f"group #{index} must be a mapping")
     name = string_field(raw, "name") or f"group-{index}"
     group_id = stable_id("group", raw.get("id") or name)
     raw_subs = raw.get("subscriptions", [])
     raw_configs = raw.get("configs", [])
+    raw_proxy_chain = raw.get("proxy_chain")
     if not isinstance(raw_subs, list):
         raise ValueError(f"group {name!r} field 'subscriptions' must be a list")
     if not isinstance(raw_configs, list):
         raise ValueError(f"group {name!r} field 'configs' must be a list")
+    proxy_chain = parse_group_proxy_chain(raw_proxy_chain, name, proxy_chains or {})
 
     subgroups: list[Subgroup] = []
     for sub_index, raw_sub in enumerate(raw_subs, start=1):
@@ -333,7 +369,23 @@ def parse_group(raw: Any, index: int, *, state: TuiState | None) -> ConfigGroup:
     if manual_configs or not subgroups:
         manual_id = stable_id("subgroup", f"{group_id}:manual")
         subgroups.append(Subgroup(id=manual_id, name=MANUAL_SUBGROUP_NAME, kind="manual", configs=manual_configs))
-    return ConfigGroup(id=group_id, name=name, subgroups=subgroups)
+    return ConfigGroup(id=group_id, name=name, subgroups=subgroups, proxy_chain=proxy_chain)
+
+
+def parse_group_proxy_chain(raw_proxy_chain: Any, group_name: str, proxy_chains: Mapping[str, ProxyChain]) -> ProxyChain | None:
+    if raw_proxy_chain is None:
+        return None
+    if isinstance(raw_proxy_chain, str):
+        name = raw_proxy_chain.strip()
+        if not name:
+            return None
+        proxy_chain = proxy_chains.get(name)
+        if proxy_chain is None:
+            raise ValueError(f"group {group_name!r} references unknown proxy chain: {name}")
+        return proxy_chain
+    if isinstance(raw_proxy_chain, list):
+        return ProxyChain(name=None, items=parse_proxy_chain_items(raw_proxy_chain, f"group {group_name!r} proxy_chain"))
+    raise ValueError(f"group {group_name!r} field 'proxy_chain' must be a chain name or list")
 
 
 def parse_subscription(raw: Any, group_id: str, index: int, *, state: TuiState | None) -> Subscription:
@@ -609,12 +661,43 @@ def build_listens(options: TuiOptions) -> list[Listen]:
     ]
 
 
-def config_item_to_xray_config(item: ConfigItem, options: TuiOptions, *, test_port: int | None = None, verbose: int = 0) -> dict[str, Any]:
-    listens = [parse_listen(f"socks5://127.0.0.1:{test_port}")] if test_port is not None else build_listens(options)
+def config_item_forward(item: ConfigItem) -> str:
     if item.kind == "link":
         if item.link is None:
             raise ValueError("link config is missing link")
-        return build_xray_config(XrayArgs(listens=listens, forwards=[item.link]), verbose=verbose)
+        return item.link
+    if item.path is None:
+        raise ValueError("path config is missing path")
+    return str(item.path)
+
+
+def proxy_chain_forwards(proxy_chain: ProxyChain | None) -> list[str]:
+    if proxy_chain is None:
+        return []
+    return [config_item_forward(item) for item in proxy_chain.items]
+
+
+def proxy_chain_label(proxy_chain: ProxyChain | None) -> str:
+    if proxy_chain is None:
+        return "-"
+    if proxy_chain.name:
+        return proxy_chain.name
+    return f"inline({len(proxy_chain.items)})"
+
+
+def config_item_to_xray_config(
+    item: ConfigItem,
+    options: TuiOptions,
+    *,
+    proxy_chain: ProxyChain | None = None,
+    test_port: int | None = None,
+    verbose: int = 0,
+) -> dict[str, Any]:
+    listens = [parse_listen(f"socks5://127.0.0.1:{test_port}")] if test_port is not None else build_listens(options)
+    if proxy_chain is not None:
+        return build_xray_config(XrayArgs(listens=listens, forwards=[config_item_forward(item), *proxy_chain_forwards(proxy_chain)]), verbose=verbose)
+    if item.kind == "link":
+        return build_xray_config(XrayArgs(listens=listens, forwards=[config_item_forward(item)]), verbose=verbose)
     if item.path is None:
         raise ValueError("path config is missing path")
     payload = json.loads(item.path.read_text(encoding="utf-8"))
@@ -625,11 +708,11 @@ def config_item_to_xray_config(item: ConfigItem, options: TuiOptions, *, test_po
     return config
 
 
-def test_config_item(item: ConfigItem, options: TuiOptions) -> dict[str, Any] | None:
+def test_config_item(item: ConfigItem, options: TuiOptions, *, proxy_chain: ProxyChain | None = None) -> dict[str, Any] | None:
     port = free_test_port()
     try:
         xray_bin = ensure_xray_dependency(verbose=options.verbose)
-        config = config_item_to_xray_config(item, options, test_port=port, verbose=options.verbose)
+        config = config_item_to_xray_config(item, options, proxy_chain=proxy_chain, test_port=port, verbose=options.verbose)
     except Exception as exc:
         return {"config-id": item.id, "result": "error", "error": f"{type(exc).__name__}: {exc}"}
     config_path = write_temp_xray_config(config, prefix="xray-tui-test-")
@@ -679,13 +762,13 @@ def choose_fastest(results: Iterable[dict[str, Any] | None]) -> dict[str, Any] |
     return min(successful, key=lambda item: item["best-delay-ms"])
 
 
-def rotate_configs(configs: Sequence[ConfigItem], options: TuiOptions) -> dict[str, Any] | None:
+def rotate_configs(configs: Sequence[ConfigItem], options: TuiOptions, *, proxy_chain: ProxyChain | None = None) -> dict[str, Any] | None:
     sampled = sample_configs(configs, options.sample)
     if not sampled:
         return None
     results: list[dict[str, Any] | None] = []
     with ThreadPoolExecutor(max_workers=min(options.jobs, len(sampled))) as executor:
-        futures = [executor.submit(test_config_item, item, options) for item in sampled]
+        futures = [executor.submit(test_config_item, item, options, proxy_chain=proxy_chain) for item in sampled]
         for future in as_completed(futures):
             results.append(future.result())
     return choose_fastest(results)
@@ -754,9 +837,9 @@ class XraySessionManager:
         self.process: subprocess.Popen[bytes] | None = None
         self.config_path: Path | None = None
 
-    def start(self, item: ConfigItem) -> None:
+    def start(self, item: ConfigItem, *, proxy_chain: ProxyChain | None = None) -> None:
         self.stop()
-        config = config_item_to_xray_config(item, self.options, verbose=self.options.verbose)
+        config = config_item_to_xray_config(item, self.options, proxy_chain=proxy_chain, verbose=self.options.verbose)
         config_dir = TUI_CACHE_DIR / "run"
         config_dir.mkdir(parents=True, exist_ok=True)
         fd, raw_path = tempfile.mkstemp(prefix="active-", suffix=".json", dir=config_dir)
@@ -957,6 +1040,9 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
                 return flatten_group(self.active_group)
             return list(self.active_subgroup.configs)
 
+        def current_proxy_chain(self) -> ProxyChain | None:
+            return self.active_group.proxy_chain if self.active_group else None
+
         def populate_table(self) -> None:
             table = self.query_one("#table", DataTable)
             table.clear(columns=True)
@@ -973,7 +1059,8 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             subgroup = self.active_subgroup.name if self.active_subgroup else "-"
             status.update(
                 f"socks {self.options.address}:{self.options.socks_port} | http {self.options.address}:{self.options.http_port} | "
-                f"group {group} | subgroup {subgroup} | tmux {self.options.tmux_session} | {message}"
+                f"group {group} | subgroup {subgroup} | chain {proxy_chain_label(self.current_proxy_chain())} | "
+                f"tmux {self.options.tmux_session} | {message}"
             )
             hints = self.query_one("#hints", Static)
             if self.chord:
@@ -1032,7 +1119,7 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             if table.cursor_row < 0 or table.cursor_row >= len(self.current_items()):
                 return
             item = self.current_items()[table.cursor_row]
-            self.runner.start(item)
+            self.runner.start(item, proxy_chain=self.current_proxy_chain())
             self.state = TuiState(
                 active_group_id=self.active_group.id if self.active_group else None,
                 active_subgroup_id=self.active_subgroup.id if self.active_subgroup else None,
@@ -1085,7 +1172,7 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
 
         def action_test_sampled(self) -> None:
             items = self.current_items()
-            result = rotate_configs(items, self.options)
+            result = rotate_configs(items, self.options, proxy_chain=self.current_proxy_chain())
             if result is None:
                 self.update_status("no working config")
                 return
@@ -1106,14 +1193,14 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
                 test_results=test_results,
             )
             save_state(self.state)
-            self.runner.start(active)
+            self.runner.start(active, proxy_chain=self.current_proxy_chain())
             self.populate_table()
             self.update_status(f"selected fastest {active.name}: {result['best-delay-ms']} ms")
 
         def action_restart_xray(self) -> None:
             active = find_config(flatten_group(self.active_group), self.state.active_config_id) if self.active_group else None
             if active:
-                self.runner.start(active)
+                self.runner.start(active, proxy_chain=self.current_proxy_chain())
                 self.update_status(f"restarted {active.name}")
 
         def action_show_tmux_info(self) -> None:
@@ -1191,7 +1278,7 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             if active is None:
                 return
             try:
-                self.runner.start(active)
+                self.runner.start(active, proxy_chain=self.current_proxy_chain())
             except Exception as exc:
                 self.update_status(f"could not start last active config: {type(exc).__name__}: {exc}")
 

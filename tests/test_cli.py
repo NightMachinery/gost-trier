@@ -1215,6 +1215,45 @@ def test_build_xray_config_chains_outbounds(monkeypatch):
     assert "sendThrough" not in config["outbounds"][0]
 
 
+def test_build_xray_config_accepts_single_json_forward_with_multiple_outbounds(tmp_path):
+    path = tmp_path / "multi.json"
+    path.write_text(
+        json.dumps(
+            {
+                "outbounds": [
+                    {"protocol": "freedom", "settings": {"hop": 1}},
+                    {"protocol": "blackhole", "settings": {"hop": 2}},
+                ]
+            }
+        )
+    )
+    args = XrayArgs(listens=[parse_listen("socks5://127.0.0.1:1050")], forwards=[str(path)])
+
+    config = build_xray_config(args)
+
+    assert [outbound["protocol"] for outbound in config["outbounds"]] == ["freedom", "blackhole"]
+
+
+def test_build_xray_config_rejects_multi_outbound_json_in_chain(tmp_path):
+    path = tmp_path / "multi.json"
+    path.write_text('{"outbounds": [{"protocol": "freedom"}, {"protocol": "blackhole"}]}')
+    args = XrayArgs(listens=[parse_listen("socks5://127.0.0.1:1050")], forwards=["direct://", str(path)])
+
+    with pytest.raises(ValueError, match="chained JSON forward must contain exactly one outbound"):
+        build_xray_config(args)
+
+
+def test_build_xray_config_accepts_raw_outbound_json_forward(tmp_path):
+    path = tmp_path / "outbound.json"
+    path.write_text('{"protocol": "freedom", "settings": {"domainStrategy": "UseIP"}}')
+    args = XrayArgs(listens=[parse_listen("socks5://127.0.0.1:1050")], forwards=[str(path)])
+
+    config = build_xray_config(args)
+
+    assert config["outbounds"][0]["protocol"] == "freedom"
+    assert config["outbounds"][0]["settings"] == {"domainStrategy": "UseIP"}
+
+
 def test_build_xray_config_creates_multiple_inbounds(monkeypatch):
     def fake_convert(link, converter=None, verbose=0):
         return [{"protocol": "freedom", "settings": {"link": link}}]
@@ -1335,6 +1374,48 @@ groups:
     assert [subgroup.name for subgroup in loaded.groups[0].subgroups] == ["example.com/trojan.txt", "Manual configs"]
     manual = loaded.groups[0].subgroups[1]
     assert [(item.name, item.protocol) for item in manual.configs] == [("Decoded Name", "vless"), ("config", "trojan")]
+
+
+def test_xray_tui_loads_named_and_inline_proxy_chains(tmp_path):
+    path = tmp_path / "hop.json"
+    path.write_text('{"outbounds": [{"protocol": "freedom"}]}')
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+proxy_chains:
+  - name: shared
+    chain:
+      - link: socks5://127.0.0.1:10050
+      - path: {path}
+groups:
+  - name: named
+    proxy_chain: shared
+    configs:
+      - link: direct://
+  - name: inline
+    proxy_chain:
+      - link: socks5://127.0.0.1:10051
+    configs:
+      - link: direct://
+"""
+    )
+
+    loaded = load_tui_config(config_path)
+
+    assert loaded.groups[0].proxy_chain is not None
+    assert loaded.groups[0].proxy_chain.name == "shared"
+    assert [item.protocol for item in loaded.groups[0].proxy_chain.items] == ["socks5", "freedom"]
+    assert loaded.groups[1].proxy_chain is not None
+    assert loaded.groups[1].proxy_chain.name is None
+    assert loaded.groups[1].proxy_chain.items[0].link == "socks5://127.0.0.1:10051"
+
+
+def test_xray_tui_rejects_unknown_proxy_chain(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n  - name: main\n    proxy_chain: missing\n    configs:\n      - link: direct://\n")
+
+    with pytest.raises(ValueError, match="unknown proxy chain"):
+        load_tui_config(config_path)
 
 
 def test_xray_tui_subscription_cache_becomes_configs(monkeypatch, tmp_path):
@@ -1492,13 +1573,64 @@ def test_xray_tui_json_config_replaces_inbounds(tmp_path):
     assert [listen.port for listen in build_listens(options)] == [1080, 2080]
 
 
+def test_xray_tui_chained_json_config_uses_single_outbound_rule(tmp_path):
+    selected = tmp_path / "selected.json"
+    selected.write_text('{"outbounds": [{"protocol": "freedom"}, {"protocol": "blackhole"}]}')
+    hop = tmp_path / "hop.json"
+    hop.write_text('{"outbounds": [{"protocol": "freedom"}]}')
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+proxy_chains:
+  - name: shared
+    chain:
+      - path: {hop}
+groups:
+  - name: main
+    proxy_chain: shared
+    configs:
+      - path: {selected}
+"""
+    )
+    loaded = load_tui_config(config_path)
+    group = loaded.groups[0]
+    item = group.subgroups[0].configs[0]
+    options = parse_tui_args(["--config", str(config_path)])
+
+    with pytest.raises(ValueError, match="chained JSON forward must contain exactly one outbound"):
+        config_item_to_xray_config(item, options, proxy_chain=group.proxy_chain)
+
+
+def test_xray_tui_chained_link_config_preserves_selected_then_chain_order(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+groups:
+  - name: main
+    proxy_chain:
+      - link: blackhole://
+    configs:
+      - link: direct://
+"""
+    )
+    loaded = load_tui_config(config_path)
+    group = loaded.groups[0]
+    item = group.subgroups[0].configs[0]
+    options = parse_tui_args(["--config", str(config_path)])
+
+    config = config_item_to_xray_config(item, options, proxy_chain=group.proxy_chain)
+
+    assert [outbound["protocol"] for outbound in config["outbounds"]] == ["freedom", "blackhole"]
+    assert config["outbounds"][0]["proxySettings"] == {"tag": "proxy-2", "transportLayer": True}
+
+
 def test_xray_tui_rotate_configs_samples_and_chooses_fastest(monkeypatch, tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("groups:\n  - name: main\n    configs:\n      - link: direct://#a\n      - link: direct://#b\n")
     items = load_tui_config(config_path).groups[0].subgroups[0].configs
     options = parse_tui_args(["--config", str(config_path), "--sample=all"])
 
-    def fake_test(item, options):
+    def fake_test(item, options, *, proxy_chain=None):
         return {"config-id": item.id, "best-delay-ms": 2 if item.name == "a" else 1}
 
     monkeypatch.setattr("gost_trier.xray_tui.test_config_item", fake_test)

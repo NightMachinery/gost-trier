@@ -198,6 +198,49 @@ def convert_link_to_outbounds(link: str, converter: Sequence[str] | None = None,
     return outbounds
 
 
+def convert_forward_to_outbounds(
+    forward: str,
+    converter: Sequence[str] | None = None,
+    *,
+    verbose: int = 0,
+    require_single_json_outbound: bool = False,
+) -> list[dict[str, Any]]:
+    if looks_like_json_forward(forward):
+        outbounds = load_json_forward_outbounds(Path(forward).expanduser())
+        if require_single_json_outbound and len(outbounds) != 1:
+            raise ValueError(f"chained JSON forward must contain exactly one outbound: {forward}")
+        return outbounds
+    return convert_link_to_outbounds(forward, converter=converter, verbose=verbose)
+
+
+def looks_like_json_forward(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    return not parsed.scheme and value.lower().endswith(".json")
+
+
+def load_json_forward_outbounds(path: Path) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"could not read JSON forward {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON forward {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON forward must be an object: {path}")
+    if isinstance(payload.get("protocol"), str):
+        return [normalize_outbound(payload)]
+    raw_outbounds = payload.get("outbounds")
+    if not isinstance(raw_outbounds, list) or not raw_outbounds:
+        raise ValueError(f"JSON forward did not contain outbounds: {path}")
+    outbounds = [normalize_outbound(item) for item in raw_outbounds if isinstance(item, dict)]
+    if not outbounds:
+        raise ValueError(f"JSON forward did not contain object outbounds: {path}")
+    return outbounds
+
+
 def parse_converter_json(stdout: str) -> dict[str, Any]:
     decoder = json.JSONDecoder()
     start = stdout.find("{")
@@ -217,12 +260,28 @@ def normalize_outbound(outbound: dict[str, Any]) -> dict[str, Any]:
 
 def build_xray_config(args: XrayArgs, *, converter: Sequence[str] | None = None, verbose: int = 0) -> dict[str, Any]:
     outbounds: list[dict[str, Any]] = []
+    require_single_json_outbound = len(args.forwards) > 1
     if len(args.forwards) == 1:
-        converted = [convert_link_to_outbounds(args.forwards[0], converter=converter, verbose=verbose)]
+        converted = [
+            convert_forward_to_outbounds(
+                args.forwards[0],
+                converter=converter,
+                verbose=verbose,
+                require_single_json_outbound=require_single_json_outbound,
+            )
+        ]
     else:
         with ThreadPoolExecutor(max_workers=len(args.forwards)) as executor:
             converted = list(
-                executor.map(lambda forward: convert_link_to_outbounds(forward, converter=converter, verbose=verbose), args.forwards)
+                executor.map(
+                    lambda forward: convert_forward_to_outbounds(
+                        forward,
+                        converter=converter,
+                        verbose=verbose,
+                        require_single_json_outbound=require_single_json_outbound,
+                    ),
+                    args.forwards,
+                )
             )
     for converted_outbounds in converted:
         outbounds.extend(normalize_outbound(item) for item in converted_outbounds)
