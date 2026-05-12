@@ -192,7 +192,7 @@ proxy_chains:
       - path: ~/xray-configs/single-outbound.json
 ```
 
-The UI shows top-level YAML groups. Each subscription becomes its own subgroup, and explicit `configs` are shown under `Manual configs`. Config `name` fields are optional. For share links, `xray-tui` uses the URL-decoded fragment after `#`, then `host:port`, then a stable generated name. The table also shows each config protocol from the link scheme, or from the first JSON outbound protocol for file configs.
+The UI shows top-level YAML groups. Each subscription becomes its own subgroup, and explicit `configs` are shown under `Manual configs`. Config `name` fields are optional. For share links, `xray-tui` uses the URL-decoded fragment after `#`, then `host:port`, then a stable generated name. The table numbers configs and shows protocol, source, state, and latency. Starting, refreshing, and testing run in the background; the status line reports progress while the UI remains responsive.
 
 Groups can set `proxy_chain` to a named chain from top-level `proxy_chains`, or to an inline list of chain entries. When a chain is configured, selected configs, restart, tests, and auto-rotate all use `selected config -> chain entries in order -> internet`. Chain entries may be links or JSON paths. JSON paths inside a chain must contain exactly one outbound; unchained selected JSON configs keep their full-config behavior.
 
@@ -221,6 +221,8 @@ Important default keys:
 
 ```text
 j/k or down/up       move rows
+h or left            focus navigation
+l or right           focus table
 [/]                  previous/next subgroup
 {/}                  previous/next group
 enter                select config and restart Xray

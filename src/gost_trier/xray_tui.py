@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import ParseResult, unquote, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
@@ -85,6 +85,18 @@ DEFAULT_HOTKEYS: dict[str, str | None] = {
     "test_sampled": "SPC t a",
     "restart_xray": "SPC x r",
     "show_tmux_info": "SPC x a",
+}
+
+
+ACTION_LABELS: dict[str, str] = {
+    "focus_or_collapse_navigation": "focus navigation",
+    "focus_or_collapse_navigation_alt": "focus navigation",
+    "focus_or_expand_table": "focus table",
+    "focus_or_expand_table_alt": "focus table",
+    "test_now": "test sampled configs",
+    "test_sampled": "test sampled configs",
+    "refresh_current": "refresh current scope",
+    "show_tmux_info": "show tmux attach command",
 }
 
 
@@ -766,7 +778,13 @@ def choose_fastest(results: Iterable[dict[str, Any] | None]) -> dict[str, Any] |
     return min(successful, key=lambda item: item["best-delay-ms"])
 
 
-def rotate_configs(configs: Sequence[ConfigItem], options: TuiOptions, *, proxy_chain: ProxyChain | None = None) -> dict[str, Any] | None:
+def rotate_configs(
+    configs: Sequence[ConfigItem],
+    options: TuiOptions,
+    *,
+    proxy_chain: ProxyChain | None = None,
+    progress: Callable[[int, int, dict[str, Any] | None], None] | None = None,
+) -> dict[str, Any] | None:
     sampled = sample_configs(configs, options.sample)
     if not sampled:
         return None
@@ -774,7 +792,10 @@ def rotate_configs(configs: Sequence[ConfigItem], options: TuiOptions, *, proxy_
     with ThreadPoolExecutor(max_workers=min(options.jobs, len(sampled))) as executor:
         futures = [executor.submit(test_config_item, item, options, proxy_chain=proxy_chain) for item in sampled]
         for future in as_completed(futures):
-            results.append(future.result())
+            result = future.result()
+            results.append(result)
+            if progress is not None:
+                progress(len(results), len(sampled), result)
     return choose_fastest(results)
 
 
@@ -965,13 +986,13 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
         Screen { layout: vertical; }
         #tabs { height: 3; display: none; }
         #body { height: 1fr; }
-        #nav { width: 32; min-width: 22; }
+        #nav { width: 32; min-width: 22; border-right: solid $panel; }
         #status, #hints { height: 1; }
         #table { width: 1fr; }
         .narrow #nav { display: none; }
         .narrow #tabs { display: block; }
         """
-        BINDINGS = [(binding.replace("SPC", "space"), action, action.replace("_", " ")) for action, binding in hotkeys.items() if binding and " " not in binding]
+        BINDINGS = [(binding.replace("SPC", "space"), action, ACTION_LABELS.get(action, action.replace("_", " "))) for action, binding in hotkeys.items() if binding and " " not in binding]
 
         def __init__(self) -> None:
             super().__init__()
@@ -985,6 +1006,8 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             self.active_subgroup = find_subgroup(self.active_group, state.active_subgroup_id) if self.active_group else None
             self.auto_rotate = False
             self.filter_text = ""
+            self.busy: str | None = None
+            self.row_status: dict[str, str] = {}
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -1001,6 +1024,7 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             self.refresh_layout()
             self.populate_tree()
             self.populate_table()
+            self.query_one("#table", DataTable).focus()
             self.update_status()
             self.set_interval(self.options.rotate_refresh, self.maybe_auto_rotate)
             self.start_last_active()
@@ -1050,28 +1074,64 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
         def populate_table(self) -> None:
             table = self.query_one("#table", DataTable)
             table.clear(columns=True)
-            table.add_columns("Name", "Protocol", "Source", "Status", "Latency")
-            for item in self.current_items():
+            table.zebra_stripes = True
+            table.fixed_columns = 1
+            table.add_columns("#", "Name", "Proto", "Source", "State", "Latency")
+            for index, item in enumerate(self.current_items(), start=1):
                 result = self.state.test_results.get(item.id, {})
                 latency = f"{result.get('best-delay-ms')} ms" if "best-delay-ms" in result else ""
-                status = "ok" if latency else result.get("result", "")
-                table.add_row(item.name, item.protocol, item.source, status, latency, key=item.id)
+                status = self.row_status.get(item.id)
+                if status is None:
+                    status = "active" if item.id == self.state.active_config_id else ("ok" if latency else result.get("result", ""))
+                table.add_row(str(index), item.name, item.protocol, item.source, status, latency, key=item.id)
 
         def update_status(self, message: str = "") -> None:
             status = self.query_one("#status", Static)
             group = self.active_group.name if self.active_group else "-"
             subgroup = self.active_subgroup.name if self.active_subgroup else "-"
-            status.update(
-                f"socks {self.options.address}:{self.options.socks_port} | http {self.options.address}:{self.options.http_port} | "
-                f"group {group} | subgroup {subgroup} | chain {proxy_chain_label(self.current_proxy_chain())} | "
-                f"tmux {self.options.tmux_session} | {message}"
+            parts = []
+            if message:
+                parts.append(message)
+            parts.extend(
+                [
+                    f"group {group}",
+                    f"subgroup {subgroup}",
+                    f"chain {proxy_chain_label(self.current_proxy_chain())}",
+                    f"socks {self.options.address}:{self.options.socks_port}",
+                    f"http {self.options.http_port}",
+                    f"tmux {self.options.tmux_session}",
+                ]
             )
+            status.update(" | ".join(parts))
             hints = self.query_one("#hints", Static)
             if self.chord:
                 remaining = ", ".join(sorted(chord_next_keys(self.hotkeys, self.chord)))
                 hints.update(f"Chord {' '.join(self.chord)} -> {remaining}")
             else:
-                hints.update("q quit | j/k move | [/]/{/} nav | enter select | r refresh | t test | SPC x r restart | SPC x a tmux")
+                hints.update("q quit | j/k move | h nav | l table | [/] subgroup | {/} group | enter start | r refresh | t test")
+
+        def set_row_status(self, item: ConfigItem, status: str | None) -> None:
+            if status is None:
+                self.row_status.pop(item.id, None)
+            else:
+                self.row_status[item.id] = status
+            self.populate_table()
+
+        def begin_operation(self, name: str, message: str) -> bool:
+            if self.busy is not None:
+                self.update_status(f"busy {self.busy}; wait for it to finish")
+                return False
+            self.busy = name
+            self.update_status(message)
+            return True
+
+        def finish_operation(self, message: str) -> None:
+            self.busy = None
+            self.update_status(message)
+
+        def operation_failed(self, name: str, exc: BaseException) -> None:
+            self.busy = None
+            self.update_status(f"{name} failed: {type(exc).__name__}: {exc}")
 
         async def on_key(self, event) -> None:  # type: ignore[no-untyped-def]
             key = textual_key_name(event.key)
@@ -1123,7 +1183,23 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             if table.cursor_row < 0 or table.cursor_row >= len(self.current_items()):
                 return
             item = self.current_items()[table.cursor_row]
-            self.runner.start(item, proxy_chain=self.current_proxy_chain())
+            if not self.begin_operation("start", f"starting #{table.cursor_row + 1} {item.name}"):
+                return
+            self.set_row_status(item, "starting")
+            proxy_chain = self.current_proxy_chain()
+            self.run_worker(lambda: self.start_item_worker(item, proxy_chain, "start"), name="start-config", group="xray-actions", thread=True, exit_on_error=False)
+
+        def start_item_worker(self, item: ConfigItem, proxy_chain: ProxyChain | None, operation: str) -> None:
+            try:
+                self.runner.start(item, proxy_chain=proxy_chain)
+            except Exception as exc:
+                self.call_from_thread(self.set_row_status, item, "error")
+                self.call_from_thread(self.operation_failed, operation, exc)
+                return
+            self.call_from_thread(self.finish_start_item, item)
+
+        def finish_start_item(self, item: ConfigItem) -> None:
+            self.row_status.clear()
             self.state = TuiState(
                 active_group_id=self.active_group.id if self.active_group else None,
                 active_subgroup_id=self.active_subgroup.id if self.active_subgroup else None,
@@ -1131,7 +1207,13 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
                 test_results=self.state.test_results,
             )
             save_state(self.state)
-            self.update_status(f"active {item.name}")
+            self.populate_table()
+            self.finish_operation(f"active {item.name}")
+
+        def start_tested_item(self, item: ConfigItem) -> None:
+            self.set_row_status(item, "starting")
+            proxy_chain = self.current_proxy_chain()
+            self.run_worker(lambda: self.start_item_worker(item, proxy_chain, "start"), name="start-tested-config", group="xray-actions", thread=True, exit_on_error=False)
 
         def action_cancel(self) -> None:
             self.chord = []
@@ -1140,14 +1222,10 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
 
         def action_refresh_current(self) -> None:
             if self.active_subgroup and self.active_subgroup.subscription:
-                refresh_subscription(self.active_subgroup.subscription, timeout=self.options.timeout)
-                self.reload_config()
-                self.update_status("refreshed subgroup")
+                self.start_refresh_worker("refresh subgroup", [self.active_subgroup.subscription])
                 return
             if self.active_group:
-                self.refresh_group(self.active_group)
-                self.reload_config()
-                self.update_status("refreshed group")
+                self.start_refresh_worker("refresh group", [subgroup.subscription for subgroup in self.active_group.subgroups if subgroup.subscription])
 
         def action_test_now(self) -> None:
             self.action_test_sampled()
@@ -1157,55 +1235,107 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             self.update_status(f"auto-rotate {'on' if self.auto_rotate else 'off'}")
 
         def action_refresh_all(self) -> None:
-            for group in self.tui_config.groups:
-                self.refresh_group(group)
-            self.reload_config()
-            self.update_status("refreshed all")
+            subscriptions = [subgroup.subscription for group in self.tui_config.groups for subgroup in group.subgroups if subgroup.subscription]
+            self.start_refresh_worker("refresh all", subscriptions)
 
         def action_refresh_group(self) -> None:
             if self.active_group:
-                self.refresh_group(self.active_group)
-                self.reload_config()
-                self.update_status("refreshed group")
+                self.start_refresh_worker("refresh group", [subgroup.subscription for subgroup in self.active_group.subgroups if subgroup.subscription])
 
         def action_refresh_subgroup(self) -> None:
             if self.active_subgroup and self.active_subgroup.subscription:
-                refresh_subscription(self.active_subgroup.subscription, timeout=self.options.timeout)
-                self.reload_config()
-                self.update_status("refreshed subgroup")
+                self.start_refresh_worker("refresh subgroup", [self.active_subgroup.subscription])
+
+        def start_refresh_worker(self, name: str, subscriptions: Sequence[Subscription | None]) -> None:
+            targets = [subscription for subscription in subscriptions if subscription is not None]
+            if not targets:
+                self.update_status("nothing to refresh")
+                return
+            if not self.begin_operation(name, f"{name}: 0/{len(targets)}"):
+                return
+            self.run_worker(lambda: self.refresh_worker(name, targets), name=name, group="xray-actions", thread=True, exit_on_error=False)
+
+        def refresh_worker(self, name: str, subscriptions: Sequence[Subscription]) -> None:
+            try:
+                for index, subscription in enumerate(subscriptions, start=1):
+                    self.call_from_thread(self.update_status, f"{name}: {index}/{len(subscriptions)} {subscription.name}")
+                    refresh_subscription(subscription, timeout=self.options.timeout)
+            except Exception as exc:
+                self.call_from_thread(self.operation_failed, name, exc)
+                return
+            self.call_from_thread(self.finish_refresh, name)
+
+        def finish_refresh(self, name: str) -> None:
+            self.reload_config()
+            self.finish_operation(f"{name} complete")
 
         def action_test_sampled(self) -> None:
             items = self.current_items()
-            result = rotate_configs(items, self.options, proxy_chain=self.current_proxy_chain())
+            if not items:
+                self.update_status("no configs to test")
+                return
+            if not self.begin_operation("test", f"testing {min(len(items), self.options.sample or len(items))} config(s): 0 done"):
+                return
+            self.run_worker(
+                lambda: self.test_sampled_worker(items, self.current_proxy_chain()),
+                name="test-sampled",
+                group="xray-actions",
+                thread=True,
+                exit_on_error=False,
+            )
+
+        def test_sampled_worker(self, items: Sequence[ConfigItem], proxy_chain: ProxyChain | None) -> None:
+            try:
+                result = rotate_configs(
+                    items,
+                    self.options,
+                    proxy_chain=proxy_chain,
+                    progress=lambda done, total, result: self.call_from_thread(self.update_test_progress, done, total, result),
+                )
+            except Exception as exc:
+                self.call_from_thread(self.operation_failed, "test", exc)
+                return
+            self.call_from_thread(self.finish_test_sampled, list(items), result)
+
+        def update_test_progress(self, done: int, total: int, result: dict[str, Any] | None) -> None:
+            suffix = ""
+            if result is not None and "best-delay-ms" in result:
+                suffix = f" | latest ok {result['best-delay-ms']} ms"
+            self.update_status(f"testing configs: {done}/{total}{suffix}")
+
+        def finish_test_sampled(self, items: Sequence[ConfigItem], result: dict[str, Any] | None) -> None:
             if result is None:
-                self.update_status("no working config")
+                self.finish_operation("no working config")
                 return
             config_id = result.get("config-id")
             if not isinstance(config_id, str):
-                self.update_status("test result missing config id")
+                self.finish_operation("test result missing config id")
                 return
             active = find_config(items, config_id)
             if active is None:
-                self.update_status("tested config disappeared")
+                self.finish_operation("tested config disappeared")
                 return
             test_results = dict(self.state.test_results)
             test_results[config_id] = result
             self.state = TuiState(
                 active_group_id=self.active_group.id if self.active_group else None,
                 active_subgroup_id=self.active_subgroup.id if self.active_subgroup else None,
-                active_config_id=config_id,
+                active_config_id=self.state.active_config_id,
                 test_results=test_results,
             )
             save_state(self.state)
-            self.runner.start(active, proxy_chain=self.current_proxy_chain())
             self.populate_table()
-            self.update_status(f"selected fastest {active.name}: {result['best-delay-ms']} ms")
+            self.update_status(f"selected fastest {active.name}: {result['best-delay-ms']} ms; starting")
+            self.start_tested_item(active)
 
         def action_restart_xray(self) -> None:
             active = find_config(flatten_group(self.active_group), self.state.active_config_id) if self.active_group else None
             if active:
-                self.runner.start(active, proxy_chain=self.current_proxy_chain())
-                self.update_status(f"restarted {active.name}")
+                if not self.begin_operation("restart", f"restarting {active.name}"):
+                    return
+                self.set_row_status(active, "starting")
+                proxy_chain = self.current_proxy_chain()
+                self.run_worker(lambda: self.start_item_worker(active, proxy_chain, "restart"), name="restart-config", group="xray-actions", thread=True, exit_on_error=False)
 
         def action_show_tmux_info(self) -> None:
             self.update_status(self.runner.attach_command())
@@ -1229,6 +1359,7 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             self.active_group = self.tui_config.groups[(index + delta) % len(self.tui_config.groups)]
             self.active_subgroup = find_subgroup(self.active_group, None)
             self.populate_table()
+            self.query_one("#table", DataTable).focus()
             self.update_tabs()
             self.update_status()
 
@@ -1238,6 +1369,7 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             index = self.active_group.subgroups.index(self.active_subgroup)
             self.active_subgroup = self.active_group.subgroups[(index + delta) % len(self.active_group.subgroups)]
             self.populate_table()
+            self.query_one("#table", DataTable).focus()
             self.update_tabs()
             self.update_status()
 
@@ -1263,7 +1395,7 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             self.update_status("filter entry is planned")
 
         def maybe_auto_rotate(self) -> None:
-            if self.auto_rotate:
+            if self.auto_rotate and self.busy is None:
                 self.action_test_sampled()
 
         def refresh_stale_selected_scope(self) -> None:
@@ -1281,10 +1413,11 @@ def run_textual_app(config: TuiConfig, state: TuiState, options: TuiOptions, hot
             active = find_config(flatten_group(self.active_group), self.state.active_config_id)
             if active is None:
                 return
-            try:
-                self.runner.start(active, proxy_chain=self.current_proxy_chain())
-            except Exception as exc:
-                self.update_status(f"could not start last active config: {type(exc).__name__}: {exc}")
+            if not self.begin_operation("start", f"restoring active {active.name}"):
+                return
+            self.set_row_status(active, "starting")
+            proxy_chain = self.current_proxy_chain()
+            self.run_worker(lambda: self.start_item_worker(active, proxy_chain, "restore"), name="restore-active-config", group="xray-actions", thread=True, exit_on_error=False)
 
         def refresh_group(self, group: ConfigGroup) -> None:
             for subgroup in group.subgroups:
