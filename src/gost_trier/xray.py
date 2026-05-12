@@ -18,7 +18,7 @@ from threading import Lock
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-from .common import free_port, is_successful_test, test_url, wait_for_port
+from .common import free_port, is_successful_test, test_url, wait_for_port, write_json_output
 from .diagnostics import completed_process_details, dump_json_for_debug, run_logged, verbose_log
 from .gost import ensure_tmux_session, strip_listen_args
 from .native import locate_xray, locate_xray_link_json
@@ -466,8 +466,7 @@ If no -F is provided, direct:// is used.
     try:
         if namespace.mode == "json":
             config = xray_run_json(runner_args, verbose=namespace.verbose)
-            json.dump(config, sys.stdout, indent=2)
-            sys.stdout.write("\n")
+            write_json_output(config, namespace.output)
             return 0
         exec_xray(runner_args, verbose=namespace.verbose)
         return 0
@@ -499,6 +498,8 @@ def add_xray_run_subparser(
         default=argparse.SUPPRESS,
         help="increase diagnostic output; repeat for more detail",
     )
+    if name == "json":
+        subparser.add_argument("-o", "--output", default="-", help="write generated JSON to this file, or - for stdout")
 
 
 def count_verbose_flags(argv: Sequence[str]) -> int:

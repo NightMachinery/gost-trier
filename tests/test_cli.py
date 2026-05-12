@@ -70,6 +70,7 @@ def test_parse_args_strips_separator_and_defaults():
     assert options.test_urls == ["https://api.ipify.org", "https://myip.wtf/json"]
     assert options.timeout == 20.0
     assert options.jobs == 1
+    assert options.output == "-"
 
 
 def test_parse_trier_args_accepts_custom_default_jobs():
@@ -99,6 +100,16 @@ def test_parse_trier_args_accepts_repeatable_verbose():
     options = parse_trier_args(["-vv", "trojan.txt", "--", "-F=MAGIC_FILE_1"], prog="xray-trier", description="test")
 
     assert options.verbose == 2
+
+
+def test_parse_trier_args_accepts_output():
+    options = parse_trier_args(
+        ["--output=results/out.json", "trojan.txt", "--", "-F=MAGIC_FILE_1"],
+        prog="xray-trier",
+        description="test",
+    )
+
+    assert options.output == "results/out.json"
 
 
 def test_parse_trier_args_preserves_url_sources():
@@ -282,6 +293,7 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
         run_in_tmux=None,
         run_top=1,
         verbose=2,
+        output="-",
     )
 
     def fake_read_candidate_files(files, shuffle):
@@ -298,6 +310,41 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
 
     assert calls == [["a"]]
     assert '"best-delay-ms": 100' in capsys.readouterr().out
+
+
+def test_run_trier_writes_output_file_and_creates_parent_dirs(tmp_path, capsys):
+    output = tmp_path / "nested" / "results.json"
+    options = TrierOptions(
+        files=[],
+        runner_args=["-F=MAGIC_FILE_1"],
+        test_urls=["https://example.com"],
+        shuffle=False,
+        timeout=1,
+        jobs=1,
+        enough_delay_ms=None,
+        sample=None,
+        run_in_tmux=None,
+        run_top=1,
+        verbose=0,
+        output=str(output),
+    )
+
+    import gost_trier.common as common
+
+    original = common.read_candidate_files
+    common.read_candidate_files = lambda files, shuffle: [["a"]]
+    try:
+        run_trier(
+            options,
+            substitute=lambda args, values: [values[0]],
+            run_test=lambda config, test_urls, timeout, verbose=0: {"best-delay-ms": 100, "config": config, "tests": []},
+            run_tmux=lambda session, results, top: None,
+        )
+    finally:
+        common.read_candidate_files = original
+
+    assert capsys.readouterr().out == ""
+    assert output.read_text() == '[\n  {\n    "best-delay-ms": 100,\n    "config": [\n      "a"\n    ],\n    "tests": []\n  }\n]\n'
 
 
 def test_progress_message_prints_success_or_failure_and_delay():
@@ -477,6 +524,24 @@ def test_xray_run_main_counts_global_verbose(monkeypatch):
 
     assert xray_run_main(["-v", "json", "-v", "-F=direct://"]) == 0
     assert seen["verbose"] == 2
+
+
+def test_xray_run_main_writes_json_output_file(monkeypatch, tmp_path, capsys):
+    output = tmp_path / "nested" / "xray-run-debug.json"
+    monkeypatch.setattr("gost_trier.xray.xray_run_json", lambda args, validate=True, verbose=0: {"outbounds": []})
+
+    assert xray_run_main(["json", "--output", str(output), "-F=direct://"]) == 0
+
+    assert capsys.readouterr().out == ""
+    assert output.read_text() == '{\n  "outbounds": []\n}\n'
+
+
+def test_xray_run_main_accepts_stdout_output(monkeypatch, capsys):
+    monkeypatch.setattr("gost_trier.xray.xray_run_json", lambda args, validate=True, verbose=0: {"outbounds": []})
+
+    assert xray_run_main(["json", "-o", "-", "-F=direct://"]) == 0
+
+    assert '"outbounds": []' in capsys.readouterr().out
 
 
 def test_xray_dependency_smoke_test_checks_version_and_config(monkeypatch):

@@ -49,6 +49,7 @@ class TrierOptions:
     run_in_tmux: str | None
     run_top: int
     verbose: int
+    output: str
 
 
 def parse_duration(value: str) -> float:
@@ -90,6 +91,7 @@ def parse_trier_args(
     parser.add_argument("--run-in-tmux", metavar="SESSION", help="launch the fastest working configs in this tmux session")
     parser.add_argument("--run-top", type=int, default=1, help="number of working configs to launch with --run-in-tmux")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="increase diagnostic output; repeat for more detail")
+    parser.add_argument("-o", "--output", default="-", help="write final JSON to this file, or - for stdout")
 
     if "--" not in argv:
         parser.parse_args(argv)
@@ -123,6 +125,7 @@ def parse_trier_args(
         run_in_tmux=namespace.run_in_tmux,
         run_top=namespace.run_top,
         verbose=namespace.verbose,
+        output=namespace.output,
     )
 
 
@@ -346,9 +349,18 @@ def run_trier(
     results.sort(key=lambda item: item["best-delay-ms"])
     if options.run_in_tmux:
         run_tmux(options.run_in_tmux, results, options.run_top)
-    json.dump(results, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    write_json_output(results, options.output)
     return 0
+
+
+def write_json_output(value: Any, output: str) -> None:
+    if output == "-":
+        json.dump(value, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
 def run_parallel_tests(

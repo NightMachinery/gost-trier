@@ -3,7 +3,7 @@
 Install and run with uv:
 
 ```sh
-uv run gost-trier [--test-url=https://api.ipify.org] [--test-url=https://myip.wtf/json] [--shuffle] [--timeout=20s] [--jobs=1] FILE [FILE ...] -- GOST_ARGS...
+uv run gost-trier [--test-url=https://api.ipify.org] [--test-url=https://myip.wtf/json] [--shuffle] [--timeout=20s] [--jobs=1] [-o RESULTS.json] FILE [FILE ...] -- GOST_ARGS...
 ```
 
 Example:
@@ -50,6 +50,14 @@ uv run xray-trier --timeout=20s trojan.txt -- -L=socks5://127.0.0.1:1050 -F=MAGI
 
 ```sh
 xray run -c <temp-file>
+```
+
+Use `-o` / `--output` to write final JSON to a file instead of stdout. `-` means stdout and is the default. Missing parent directories are created automatically.
+
+```sh
+uv run xray-run json -o xray-run-debug.json -L=socks5://127.0.0.1:1050 -F='vless://...'
+uv run xray-trier -o results/xray-working.json --timeout=5s trojan.txt -- -F=MAGIC_FILE_1
+uv run gost-trier -o results/gost-working.json trojan.txt -- -F=MAGIC_FILE_1
 ```
 
 All commands accept repeatable `-v` / `--verbose` flags. For `xray-run` you may put them either before or after the subcommand:
@@ -104,7 +112,7 @@ uv run xray-trier --run-in-tmux=xray --run-top=3 trojan.txt -- -L=socks5://127.0
 
 When `--run-in-tmux` is used, the command prints the tmux session name, an attach command when tmux is available, and curl commands for testing the launched listeners. On Windows these test commands use `curl.exe` to avoid PowerShell aliases. If `tmux` is missing, it attempts a best-effort install using the available system package manager, including common Linux package managers, Homebrew on macOS, and Scoop/Chocolatey/Winget on Windows. If tmux still is not available, it falls back to managed detached processes. Reusing the same session name cleans up previously managed processes for that session before launching new ones.
 
-Progress is written to stderr. The final stdout is a JSON array sorted by `best-delay-ms`:
+Progress is written to stderr. The final JSON output is a JSON array sorted by `best-delay-ms`:
 
 ```json
 [

@@ -50,6 +50,12 @@ For native helper problems, add repeatable `-v` flags. `-v` prints selected help
 xray-run json -vvv -L=socks5://127.0.0.1:1060 -L=http://127.0.0.1:2060 -F='vless://...'
 ```
 
+To keep the generated config for inspection, write JSON to a file with `-o` / `--output`; missing parent directories are created automatically:
+
+```powershell
+xray-run json -vvv -o xray-run-debug.json -L=socks5://127.0.0.1:1060 -L=http://127.0.0.1:2060 -F='vless://...'
+```
+
 To upgrade later, `uv tool upgrade` uses `uv`'s recorded tool requirement:
 
 ```sh

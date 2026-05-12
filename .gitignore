@@ -1,9 +1,9 @@
 trojan.txt
 
 good.json
+xray-run-debug.json
 
 .venv/
 __pycache__/
 .pytest_cache/
 *.pyc
-
