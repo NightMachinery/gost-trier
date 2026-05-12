@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "httpx[socks]>=0.27.0",
+    "PyYAML>=6.0.0",
     "socksio>=1.0.0",
+    "textual>=0.89.0",
     "tqdm>=4.66.0",
 ]
 
@@ -14,6 +16,7 @@ dependencies = [
 gost-trier = "gost_trier.cli:main"
 xray-run = "gost_trier.xray:xray_run_main"
 xray-trier = "gost_trier.xray_trier:main"
+xray-tui = "gost_trier.xray_tui:main"
 
 [dependency-groups]
 dev = [

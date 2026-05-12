@@ -44,6 +44,7 @@ Installing this repo provides two Xray commands as well:
 uv run xray-run json '-L=socks5://127.0.0.1:1050' '-F=trojan://...'
 uv run xray-run exec '-L=socks5://127.0.0.1:1050' '-F=trojan://...'
 uv run xray-trier --timeout=20s trojan.txt -- '-L=socks5://127.0.0.1:1050' '-F=MAGIC_FILE_1'
+uv run xray-tui --socks-port=1080 --http-port=2080
 ```
 
 `xray-run json` prints the generated Xray JSON config. `xray-run exec` writes the config to a temporary file and runs:
@@ -153,3 +154,77 @@ For native helper problems, add repeatable `-v` flags. `-v` prints selected help
 ```powershell
 xray-run json -vvv '-L=socks5://127.0.0.1:1060' '-L=http://127.0.0.1:2060' '-F=vless://...'
 ```
+
+## xray-tui
+
+`xray-tui` is an interactive Textual UI over Xray subscriptions and explicit configs:
+
+```sh
+uv run xray-tui --address=127.0.0.1 --socks-port=1080 --http-port=2080
+```
+
+If the YAML config is missing, `xray-tui` creates `~/.xray-tui/config.yaml` and exits. Parent directories are created automatically. A minimal config looks like this:
+
+```yaml
+groups:
+  - name: default
+    subscriptions:
+      - url: https://example.com/sub.txt
+      - name: backup
+        url: https://example.com/backup.txt
+    configs:
+      - link: direct://
+      - link: vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls#decoded%20name
+      - path: ~/xray-configs/example.json
+```
+
+The UI shows top-level YAML groups. Each subscription becomes its own subgroup, and explicit `configs` are shown under `Manual configs`. Config `name` fields are optional. For share links, `xray-tui` uses the URL-decoded fragment after `#`, then `host:port`, then a stable generated name. The table also shows each config protocol from the link scheme, or from the first JSON outbound protocol for file configs.
+
+Subscriptions are cached under `~/.cache/gost-trier/xray-tui/`. Refresh first tries a direct no-proxy download, then retries with normal `HTTP_PROXY` / `HTTPS_PROXY` environment handling. If refresh fails, the old cache is kept.
+
+The active Xray process uses both listeners:
+
+```text
+socks5://127.0.0.1:1080
+http://127.0.0.1:2080
+```
+
+For JSON config files, `xray-tui` replaces `inbounds` with those listeners so the CLI ports always apply. For share links, it reuses the same conversion path as `xray-run`.
+
+When tmux is available, `xray-tui` runs the active Xray config in:
+
+```sh
+tmux attach -t xray-tui-s1080-h2080
+```
+
+The default session template is `--tmux-session=xray-tui-s{SOCKS_PORT}-h{HTTP_PORT}`. By default the active Xray process is stopped when the TUI exits; use `--no-stop-on-exit` to leave it running.
+
+Important default keys:
+
+```text
+j/k or down/up       move rows
+[/]                  previous/next subgroup
+{/}                  previous/next group
+enter                select config and restart Xray
+r                    refresh current subscription subgroup or group
+t                    test sampled configs now
+a                    toggle auto-rotate
+SPC r a              refresh all subscriptions
+SPC r g              refresh current group
+SPC r s              refresh current subscription subgroup
+SPC t a              test sampled configs now
+SPC x r              restart active Xray
+SPC x a              show tmux attach info
+q                    quit
+```
+
+Hotkeys can be customized with trusted executable Python in `~/.xray-tui/config.py` by default:
+
+```python
+def configure(hotkeys):
+    hotkeys["restart_xray"] = "SPC x r"
+    hotkeys["quit"] = "ctrl+q"
+    hotkeys["refresh_all"] = None
+```
+
+Assign `None` to disable an action. Unknown action names and duplicate key bindings are treated as config errors. Only use `config.py` files you trust.

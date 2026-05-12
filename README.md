@@ -40,7 +40,7 @@ cd /path/to/gost-trier
 uv tool install .
 ```
 
-This installs `gost-trier`, `xray-trier`, and `xray-run`.
+This installs `gost-trier`, `xray-trier`, `xray-run`, and `xray-tui`.
 
 `xray-run` and `xray-trier` auto-bootstrap native helpers when needed. They first honor explicit binary overrides, then use cached release binaries for Xray and `Xray-Link-Json` under `~/.cache/gost-trier/bin/`, then fall back to binaries already on `PATH`. Release archive downloads and remote candidate-list downloads show byte progress on stderr by default; use `--no-progress` to hide progress bars. If a proxy is active for downloads, the first download prints `Using proxy for downloads: ...` with credentials redacted. `Xray-Link-Json` falls back to `go install` only if the release download is not available. Advanced users can override these paths with `XRAY_BIN` and `XRAY_LINK_JSON_BIN`.
 
@@ -93,3 +93,15 @@ xray-trier -o trier_results.json --timeout=5s --sample=100 --enough-delay-ms=200
 ```
 
 See [docs/usage.md](docs/usage.md) for more.
+
+## xray-tui
+
+`xray-tui` provides an interactive Textual UI for grouped Xray subscriptions and manual configs:
+
+```sh
+xray-tui --socks-port=1080 --http-port=2080
+```
+
+On first run it creates `~/.xray-tui/config.yaml`, prints a short help message, and exits. Edit the YAML, then rerun `xray-tui`. Each subscription is shown as its own subgroup, plus a `Manual configs` subgroup for explicit links and JSON files. Config names are optional: link fragments like `#My%20Node` are URL-decoded, then `host:port` is used as a fallback.
+
+When tmux is available, the active Xray process runs in `--tmux-session=xray-tui-s{SOCKS_PORT}-h{HTTP_PORT}` so you can inspect it with `tmux attach -t xray-tui-s1080-h2080`. By default `xray-tui` stops that process on exit; pass `--no-stop-on-exit` to leave it running.

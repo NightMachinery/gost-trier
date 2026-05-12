@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -61,6 +62,27 @@ from gost_trier.xray import (
     validate_xray_config,
     xray_run_main,
     xray_tmux_command,
+)
+from gost_trier.xray_tui import (
+    DEFAULT_HOTKEYS,
+    TuiOptions,
+    TuiState,
+    XraySessionManager,
+    build_listens,
+    choose_fastest,
+    config_item_to_xray_config,
+    ensure_example_config,
+    layout_mode,
+    link_display_name,
+    load_hotkeys,
+    load_tui_config,
+    parse_tui_args,
+    refresh_subscription,
+    rotate_configs,
+    sample_configs,
+    stable_id,
+    subscription_links_from_bytes,
+    true_color_enabled,
 )
 from gost_trier.native import (
     Release,
@@ -1131,3 +1153,228 @@ def test_xray_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "runner: managed detached processes" in err
     assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
+
+
+def test_xray_tui_parse_args_defaults_and_tmux_template():
+    options = parse_tui_args([])
+
+    assert options.address == "127.0.0.1"
+    assert options.socks_port == 1080
+    assert options.http_port == 2080
+    assert options.test_urls == ["https://api.ipify.org"]
+    assert options.tmux_session == "xray-tui-s1080-h2080"
+    assert options.stop_on_exit
+    assert options.sample == 100
+
+
+def test_xray_tui_parse_args_accepts_sample_all_and_no_python_config(tmp_path):
+    options = parse_tui_args(["--config", str(tmp_path / "config.yaml"), "--sample=all", "--no-python-config", "--no-stop-on-exit"])
+
+    assert options.sample is None
+    assert options.python_config is None
+    assert not options.stop_on_exit
+
+
+def test_xray_tui_creates_example_config(tmp_path):
+    path = tmp_path / "nested" / "config.yaml"
+
+    assert ensure_example_config(path)
+    assert not ensure_example_config(path)
+    assert "groups:" in path.read_text()
+
+
+def test_xray_tui_loads_groups_subgroups_names_and_protocols(monkeypatch, tmp_path):
+    monkeypatch.setattr("gost_trier.xray_tui.TUI_CACHE_DIR", tmp_path / "cache")
+    json_path = tmp_path / "config.json"
+    json_path.write_text('{"outbounds": [{"protocol": "trojan"}]}')
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+groups:
+  - name: main
+    subscriptions:
+      - url: https://example.com/trojan.txt
+    configs:
+      - link: vless://00000000-0000-0000-0000-000000000000@example.com:443#Decoded%20Name
+      - path: {json_path}
+"""
+    )
+
+    loaded = load_tui_config(config_path)
+
+    assert loaded.groups[0].name == "main"
+    assert [subgroup.name for subgroup in loaded.groups[0].subgroups] == ["example.com/trojan.txt", "Manual configs"]
+    manual = loaded.groups[0].subgroups[1]
+    assert [(item.name, item.protocol) for item in manual.configs] == [("Decoded Name", "vless"), ("config", "trojan")]
+
+
+def test_xray_tui_subscription_cache_becomes_configs(monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr("gost_trier.xray_tui.TUI_CACHE_DIR", cache_dir)
+    sub_id = stable_id("subscription", f"{stable_id('group', 'main')}:https://example.com/sub.txt")
+    cache_file = cache_dir / "subscriptions" / f"{sub_id}.json"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text('{"links": ["trojan://user@example.com:443#One"], "last_refreshed_at": 123}')
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n  - name: main\n    subscriptions:\n      - url: https://example.com/sub.txt\n")
+
+    loaded = load_tui_config(config_path)
+    subgroup = loaded.groups[0].subgroups[0]
+
+    assert subgroup.configs[0].name == "One"
+    assert subgroup.configs[0].protocol == "trojan"
+
+
+def test_xray_tui_link_display_name_decodes_fragment_and_falls_back_to_host_port():
+    assert link_display_name("trojan://user@example.com:443#hello%20world", fallback="x") == "hello world"
+    assert link_display_name("trojan://user@example.com:443", fallback="x") == "example.com:443"
+    assert link_display_name("direct://", fallback="x") == "x"
+
+
+def test_xray_tui_hotkey_config_can_override_and_disable(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        """
+def configure(hotkeys):
+    hotkeys["restart_xray"] = "SPC x R"
+    hotkeys["refresh_all"] = None
+"""
+    )
+
+    hotkeys = load_hotkeys(config)
+
+    assert hotkeys["restart_xray"] == "SPC x R"
+    assert hotkeys["refresh_all"] is None
+
+
+def test_xray_tui_hotkey_config_rejects_duplicate(tmp_path):
+    config = tmp_path / "config.py"
+    config.write_text(
+        """
+def configure(hotkeys):
+    hotkeys["quit"] = "r"
+"""
+    )
+
+    with pytest.raises(ValueError, match="duplicate hotkey"):
+        load_hotkeys(config)
+
+
+def test_xray_tui_subscription_links_decode_base64():
+    payload = base64.b64encode(b"# comment\ntrojan://one\nvless://two\n")
+
+    assert subscription_links_from_bytes(payload) == ["trojan://one", "vless://two"]
+
+
+def test_xray_tui_refresh_subscription_keeps_old_cache_on_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr("gost_trier.xray_tui.TUI_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr("gost_trier.xray_tui.download_without_proxy", lambda url, timeout: (_ for _ in ()).throw(RuntimeError("direct bad")))
+    monkeypatch.setattr("gost_trier.xray_tui.download_with_env_proxy", lambda url, timeout: (_ for _ in ()).throw(RuntimeError("proxy bad")))
+    sub_id = "subscription-test"
+    cache_file = tmp_path / "cache" / "subscriptions" / f"{sub_id}.json"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_text('{"links": ["trojan://old"], "last_refreshed_at": 12}')
+
+    from gost_trier.xray_tui import Subscription
+
+    refreshed = refresh_subscription(Subscription(id=sub_id, name="sub", url="https://example.com/sub.txt"))
+
+    assert refreshed.configs == []
+    cache = json.loads(cache_file.read_text())
+    assert cache["links"] == ["trojan://old"]
+    assert "direct bad" in cache["error"]
+
+
+def test_xray_tui_refresh_subscription_tries_proxy_after_direct(monkeypatch, tmp_path):
+    monkeypatch.setattr("gost_trier.xray_tui.TUI_CACHE_DIR", tmp_path / "cache")
+    calls = []
+    monkeypatch.setattr("gost_trier.xray_tui.download_without_proxy", lambda url, timeout: calls.append("direct") or (_ for _ in ()).throw(RuntimeError("bad")))
+    monkeypatch.setattr("gost_trier.xray_tui.download_with_env_proxy", lambda url, timeout: calls.append("proxy") or b"trojan://new#Name\n")
+
+    from gost_trier.xray_tui import Subscription
+
+    refreshed = refresh_subscription(Subscription(id="subscription-test", name="sub", url="https://example.com/sub.txt"))
+
+    assert calls == ["direct", "proxy"]
+    assert refreshed.configs[0].name == "Name"
+
+
+def test_xray_tui_json_config_replaces_inbounds(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"inbounds": [{"port": 1}], "outbounds": [{"protocol": "freedom", "settings": {}}]}')
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"groups:\n  - name: main\n    configs:\n      - path: {path}\n")
+    item = load_tui_config(config_path).groups[0].subgroups[0].configs[0]
+    options = TuiOptions(
+        address="127.0.0.1",
+        socks_port=1080,
+        http_port=2080,
+        test_urls=["https://example.com"],
+        config=config_path,
+        python_config=None,
+        tmux_session="xray-tui-test",
+        stop_on_exit=True,
+        sub_auto_refresh=60,
+        rotate_refresh=60,
+        sample=100,
+        timeout=1,
+        jobs=1,
+        true_color="auto",
+        dark_mode="auto",
+        light_theme="xray-light",
+        dark_theme="xray-dark",
+        verbose=0,
+    )
+
+    config = config_item_to_xray_config(item, options)
+
+    assert [inbound["port"] for inbound in config["inbounds"]] == [1080, 2080]
+    assert [listen.port for listen in build_listens(options)] == [1080, 2080]
+
+
+def test_xray_tui_rotate_configs_samples_and_chooses_fastest(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n  - name: main\n    configs:\n      - link: direct://#a\n      - link: direct://#b\n")
+    items = load_tui_config(config_path).groups[0].subgroups[0].configs
+    options = parse_tui_args(["--config", str(config_path), "--sample=all"])
+
+    def fake_test(item, options):
+        return {"config-id": item.id, "best-delay-ms": 2 if item.name == "a" else 1}
+
+    monkeypatch.setattr("gost_trier.xray_tui.test_config_item", fake_test)
+
+    assert rotate_configs(items, options)["config-id"] == items[1].id
+    assert choose_fastest([None, {"best-delay-ms": 5}, {"best-delay-ms": 3}]) == {"best-delay-ms": 3}
+    assert len(sample_configs(items, 1)) == 1
+
+
+def test_xray_tui_session_manager_uses_tmux_and_cleans_up(monkeypatch, tmp_path):
+    commands = []
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("groups:\n  - name: main\n    configs:\n      - link: direct://\n")
+    item = load_tui_config(config_path).groups[0].subgroups[0].configs[0]
+    options = parse_tui_args(["--config", str(config_path), "--tmux-session=test-session"])
+
+    monkeypatch.setattr("gost_trier.xray_tui.TUI_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr("gost_trier.xray_tui.shutil.which", lambda name: "/usr/bin/tmux" if name == "tmux" else None)
+    monkeypatch.setattr("gost_trier.xray_tui.ensure_tmux_session", lambda session: commands.append(["ensure", session]))
+    monkeypatch.setattr("gost_trier.xray_tui.ensure_xray_dependency", lambda verbose=0: "xray")
+    monkeypatch.setattr("gost_trier.xray_tui.build_xray_config", lambda args, verbose=0: {"inbounds": [], "outbounds": [{"protocol": "freedom"}]})
+    monkeypatch.setattr("gost_trier.xray_tui.subprocess.run", lambda command, **kwargs: commands.append(command) or subprocess.CompletedProcess(command, 0))
+
+    manager = XraySessionManager(options)
+    manager.start(item)
+    manager.stop()
+
+    assert ["ensure", "test-session"] in commands
+    assert any(command[:4] == ["tmux", "new-window", "-t", "test-session"] for command in commands if isinstance(command, list))
+    assert any(command[:3] == ["tmux", "kill-window", "-t"] for command in commands if isinstance(command, list))
+
+
+def test_xray_tui_layout_and_true_color(monkeypatch):
+    assert layout_mode(99) == "narrow"
+    assert layout_mode(100) == "wide"
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    assert true_color_enabled("auto")
+    assert true_color_enabled("on")
+    assert not true_color_enabled("off")
