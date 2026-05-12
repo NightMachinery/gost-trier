@@ -46,6 +46,14 @@ This installs `gost-trier`, `xray-trier`, and `xray-run`.
 
 `xray-trier` performs Xray and `Xray-Link-Json` setup checks once before launching parallel config tests, so high `--jobs` values do not repeat native smoke tests for every sampled config.
 
+To explicitly check for newer cached helper binaries and download missing latest releases, run:
+
+```sh
+xray-run update-binaries
+```
+
+Use `xray-run update-binaries --no-download` to check what would be downloaded without writing binaries.
+
 To upgrade later, `uv tool upgrade` uses `uv`'s recorded tool requirement:
 
 ```sh

@@ -30,7 +30,7 @@ from .common import (
 from .diagnostics import completed_process_details, dump_json_for_debug, run_logged, verbose_log
 from .downloads import set_download_progress_enabled
 from .gost import ensure_tmux_session, strip_listen_args
-from .native import locate_xray, locate_xray_link_json
+from .native import BinaryUpdateResult, locate_xray, locate_xray_link_json, update_xray, update_xray_link_json
 from .sessions import run_managed_session
 
 
@@ -462,7 +462,7 @@ If no -F is provided, direct:// is used.
     parser.add_argument("--progress", dest="progress", action="store_true", help="show download progress bars")
     parser.add_argument("--no-progress", dest="progress", action="store_false", help="hide download progress bars")
     parser.set_defaults(progress=True)
-    subparsers = parser.add_subparsers(dest="mode", metavar="{json,exec}", required=True)
+    subparsers = parser.add_subparsers(dest="mode", metavar="{json,exec,update-binaries}", required=True)
     add_xray_run_subparser(
         subparsers,
         "json",
@@ -481,6 +481,14 @@ If no -F is provided, direct:// is used.
   xray-run exec -L=socks5://127.0.0.1:1060 -L=http://user:password@:2060 -F='vless://...'
 """,
     )
+    update_parser = subparsers.add_parser(
+        "update-binaries",
+        help="check for Xray binary updates and download missing latest releases",
+        description="Check GitHub releases for Xray and Xray-Link-Json and cache missing latest binaries.",
+    )
+    update_parser.add_argument("--progress", dest="progress", action="store_true", default=argparse.SUPPRESS, help="show download progress bars")
+    update_parser.add_argument("--no-progress", dest="progress", action="store_false", default=argparse.SUPPRESS, help="hide download progress bars")
+    update_parser.add_argument("--no-download", action="store_true", help="only report latest cached/downloadable binaries")
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     namespace, runner_args = parser.parse_known_args(raw_argv)
     namespace.verbose = max(namespace.verbose, count_verbose_flags(raw_argv))
@@ -492,6 +500,9 @@ If no -F is provided, direct:// is used.
         if namespace.mode == "json":
             config = xray_run_json(runner_args, verbose=namespace.verbose)
             write_json_output(config, namespace.output)
+            return 0
+        if namespace.mode == "update-binaries":
+            update_binaries(no_download=namespace.no_download)
             return 0
         exec_xray(runner_args, verbose=namespace.verbose)
         return 0
@@ -527,6 +538,24 @@ def add_xray_run_subparser(
     subparser.add_argument("--no-progress", dest="progress", action="store_false", default=argparse.SUPPRESS, help="hide download progress bars")
     if name == "json":
         subparser.add_argument("-o", "--output", default="-", help="write generated JSON to this file, or - for stdout")
+
+
+def update_binaries(*, no_download: bool = False) -> list[BinaryUpdateResult]:
+    results = [update_xray(no_download=no_download), update_xray_link_json(no_download=no_download)]
+    for result in results:
+        print_binary_update_result(result, no_download=no_download)
+    return results
+
+
+def print_binary_update_result(result: BinaryUpdateResult, *, no_download: bool = False) -> None:
+    if result.cached is not None:
+        print(f"{result.tool}: latest {result.tag} already cached: {result.cached}", file=sys.stderr)
+    elif result.installed is not None:
+        print(f"{result.tool}: downloaded {result.tag}: {result.installed}", file=sys.stderr)
+    elif no_download:
+        print(f"{result.tool}: latest {result.tag} available: {result.asset_name} ({result.download_url})", file=sys.stderr)
+    else:
+        print(f"{result.tool}: latest {result.tag} available: {result.asset_name}", file=sys.stderr)
 
 
 def count_verbose_flags(argv: Sequence[str]) -> int:

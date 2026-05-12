@@ -99,6 +99,8 @@ Xray itself is discovered in this order:
 
 Release archive downloads and remote candidate-list downloads show byte progress on stderr by default. Use `--no-progress` to hide progress bars, or `--progress` to make the default explicit. If Python's active proxy settings route a download through a proxy, the first download prints `Using proxy for downloads: ...` with proxy credentials redacted.
 
+Normal `xray-run` and `xray-trier` startup uses an existing `PATH` binary or cached helper binary before making GitHub release API requests. To explicitly check GitHub for newer helper binaries, run `xray-run update-binaries`; add `--no-download` to report the latest available release assets without downloading them.
+
 `xray-trier` runs Xray and `Xray-Link-Json` resolution plus native smoke checks once before starting parallel config tests. The checks are cached for the rest of the process, including direct `xray-run` setup calls.
 
 For multiple `-F` values, `xray-run` creates best-effort chained Xray outbounds with `proxySettings`, preserving CLI order.

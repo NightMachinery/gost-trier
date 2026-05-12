@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .downloads import download_file
+from .downloads import download_file, url_error_message
 
 
 GITHUB_API = "https://api.github.com/repos"
@@ -35,6 +36,16 @@ class ReleaseAsset:
 class Release:
     tag: str
     assets: list[ReleaseAsset]
+
+
+@dataclass(frozen=True)
+class BinaryUpdateResult:
+    tool: str
+    tag: str
+    asset_name: str
+    cached: Path | None
+    installed: Path | None
+    download_url: str
 
 
 def system_arch() -> tuple[str, str]:
@@ -65,9 +76,13 @@ def executable_suffix(goos: str | None = None) -> str:
 
 @lru_cache(maxsize=None)
 def latest_release(repo: str) -> Release:
-    request = Request(f"{GITHUB_API}/{repo}/releases/latest", headers={"User-Agent": "gost-trier/0.1.0"})
-    with urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    url = f"{GITHUB_API}/{repo}/releases/latest"
+    request = Request(url, headers={"User-Agent": "gost-trier/0.1.0"})
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError) as exc:
+        raise RuntimeError(url_error_message("failed to fetch latest release metadata from", url, exc)) from exc
     assets = [
         ReleaseAsset(
             name=item["name"],
@@ -100,8 +115,13 @@ def resolve_release_binary(
 
     with _RESOLVE_LOCK:
         goos, goarch = system_arch()
+        platform_cache_dir = DEFAULT_CACHE_ROOT / "bin" / tool
+        cached = find_cached_executable(platform_cache_dir, goos, goarch, executable_names)
+        if cached is not None:
+            return cached
+
         release = latest_release(repo)
-        cache_dir = DEFAULT_CACHE_ROOT / "bin" / tool / release.tag / f"{goos}-{goarch}"
+        cache_dir = platform_cache_dir / release.tag / f"{goos}-{goarch}"
         cached = find_executable(cache_dir, executable_names)
         if cached is not None:
             return cached
@@ -112,25 +132,85 @@ def resolve_release_binary(
             raise RuntimeError(f"no {tool} release asset for {goos}/{goarch}: expected {wanted_name}")
 
         archive_path = cache_dir / asset.name
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        print(f"{tool}: downloading {asset.name}", file=sys.stderr)
-        download_file(asset.download_url, archive_path)
-        verify_digest(archive_path, asset.digest)
+        return install_release_asset(
+            tool=tool,
+            asset=asset,
+            archive_path=archive_path,
+            cache_dir=cache_dir,
+            executable_names=executable_names,
+        )
 
-        extract_dir = cache_dir / "extract"
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir)
-        extract_dir.mkdir(parents=True)
-        extract_archive(archive_path, extract_dir)
 
-        binary = find_executable(extract_dir, executable_names)
-        if binary is None:
-            raise RuntimeError(f"{tool} archive did not contain one of: {', '.join(executable_names)}")
-        make_executable(binary)
-        installed = cache_dir / binary.name
-        shutil.copy2(binary, installed)
-        make_executable(installed)
-        return installed
+def update_release_binary(
+    *,
+    tool: str,
+    repo: str,
+    executable_names: Sequence[str],
+    asset_name: Callable[[str, str, str], str],
+    no_download: bool = False,
+) -> BinaryUpdateResult:
+    goos, goarch = system_arch()
+    release = latest_release(repo)
+    cache_dir = DEFAULT_CACHE_ROOT / "bin" / tool / release.tag / f"{goos}-{goarch}"
+    cached = find_executable(cache_dir, executable_names)
+    wanted_name = asset_name(release.tag, goos, goarch)
+    asset = next((item for item in release.assets if item.name == wanted_name), None)
+    if asset is None:
+        raise RuntimeError(f"no {tool} release asset for {goos}/{goarch}: expected {wanted_name}")
+    if cached is not None or no_download:
+        return BinaryUpdateResult(
+            tool=tool,
+            tag=release.tag,
+            asset_name=asset.name,
+            cached=cached,
+            installed=None,
+            download_url=asset.download_url,
+        )
+
+    installed = install_release_asset(
+        tool=tool,
+        asset=asset,
+        archive_path=cache_dir / asset.name,
+        cache_dir=cache_dir,
+        executable_names=executable_names,
+    )
+    return BinaryUpdateResult(
+        tool=tool,
+        tag=release.tag,
+        asset_name=asset.name,
+        cached=None,
+        installed=installed,
+        download_url=asset.download_url,
+    )
+
+
+def install_release_asset(
+    *,
+    tool: str,
+    asset: ReleaseAsset,
+    archive_path: Path,
+    cache_dir: Path,
+    executable_names: Sequence[str],
+) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    print(f"{tool}: downloading {asset.name}", file=sys.stderr)
+    download_file(asset.download_url, archive_path)
+    verify_digest(archive_path, asset.digest)
+
+    extract_dir = cache_dir / "extract"
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+    extract_dir.mkdir(parents=True)
+    extract_archive(archive_path, extract_dir)
+
+    binary = find_executable(extract_dir, executable_names)
+    if binary is None:
+        raise RuntimeError(f"{tool} archive did not contain one of: {', '.join(executable_names)}")
+    make_executable(binary)
+    installed = cache_dir / binary.name
+    shutil.copy2(binary, installed)
+    make_executable(installed)
+    return installed
 
 
 def verify_digest(path: Path, digest: str | None) -> None:
@@ -161,6 +241,17 @@ def find_executable(root: Path, executable_names: Sequence[str]) -> Path | None:
     for path in root.rglob("*"):
         if path.is_file() and path.name in allowed:
             return path
+    return None
+
+
+def find_cached_executable(root: Path, goos: str, goarch: str, executable_names: Sequence[str]) -> Path | None:
+    if not root.exists():
+        return None
+    platform_suffix = f"{goos}-{goarch}"
+    for cache_dir in sorted(root.glob(f"*/{platform_suffix}"), reverse=True):
+        binary = find_executable(cache_dir, executable_names)
+        if binary is not None:
+            return binary
     return None
 
 
@@ -204,6 +295,17 @@ def locate_xray_link_json() -> Path:
     )
 
 
+def update_xray_link_json(*, no_download: bool = False) -> BinaryUpdateResult:
+    suffix = executable_suffix()
+    return update_release_binary(
+        tool="Xray-Link-Json",
+        repo="NightMachinery/Xray-Link-Json",
+        executable_names=[f"Xray-Link-Json{suffix}", "Xray-Link-Json"],
+        asset_name=xray_link_json_asset_name,
+        no_download=no_download,
+    )
+
+
 def locate_xray() -> Path:
     suffix = executable_suffix()
     return resolve_release_binary(
@@ -212,4 +314,15 @@ def locate_xray() -> Path:
         executable_names=[f"xray{suffix}", "xray"],
         asset_name=xray_asset_name,
         env_var="XRAY_BIN",
+    )
+
+
+def update_xray(*, no_download: bool = False) -> BinaryUpdateResult:
+    suffix = executable_suffix()
+    return update_release_binary(
+        tool="xray",
+        repo="XTLS/Xray-core",
+        executable_names=[f"xray{suffix}", "xray"],
+        asset_name=xray_asset_name,
+        no_download=no_download,
     )

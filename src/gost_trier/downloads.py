@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from threading import Lock
 from urllib.parse import urlsplit, urlunsplit
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, getproxies, proxy_bypass, urlopen
 
 from tqdm import tqdm
@@ -26,24 +27,36 @@ def download_bytes(url: str, *, timeout: float = 30, desc: str | None = None) ->
     chunks: list[bytes] = []
     request = Request(url, headers={"User-Agent": USER_AGENT})
     print_proxy_notice(url)
-    with urlopen(request, timeout=timeout) as response:
-        progress = download_progress(response, desc or download_name(url))
-        with progress:
-            while chunk := response.read(DOWNLOAD_CHUNK_SIZE):
-                chunks.append(chunk)
-                progress.update(len(chunk))
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            progress = download_progress(response, desc or download_name(url))
+            with progress:
+                while chunk := response.read(DOWNLOAD_CHUNK_SIZE):
+                    chunks.append(chunk)
+                    progress.update(len(chunk))
+    except (HTTPError, URLError) as exc:
+        raise RuntimeError(url_error_message("failed to download", url, exc)) from exc
     return b"".join(chunks)
 
 
 def download_file(url: str, destination: Path, *, timeout: float = 120) -> None:
     request = Request(url, headers={"User-Agent": USER_AGENT})
     print_proxy_notice(url)
-    with urlopen(request, timeout=timeout) as response, destination.open("wb") as file:
-        progress = download_progress(response, destination.name)
-        with progress:
-            while chunk := response.read(DOWNLOAD_CHUNK_SIZE):
-                file.write(chunk)
-                progress.update(len(chunk))
+    try:
+        with urlopen(request, timeout=timeout) as response, destination.open("wb") as file:
+            progress = download_progress(response, destination.name)
+            with progress:
+                while chunk := response.read(DOWNLOAD_CHUNK_SIZE):
+                    file.write(chunk)
+                    progress.update(len(chunk))
+    except (HTTPError, URLError) as exc:
+        raise RuntimeError(url_error_message("failed to download", url, exc)) from exc
+
+
+def url_error_message(action: str, url: str, exc: HTTPError | URLError) -> str:
+    if isinstance(exc, HTTPError):
+        return f"{action} {url}: HTTP {exc.code}: {exc.reason}"
+    return f"{action} {url}: {exc.reason}"
 
 
 def download_progress(response: object, desc: str) -> tqdm:

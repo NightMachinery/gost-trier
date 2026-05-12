@@ -5,6 +5,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 import socksio
@@ -24,6 +25,7 @@ from gost_trier.common import (
 )
 from gost_trier.downloads import (
     content_length,
+    download_bytes,
     download_file,
     download_proxy_for_url,
     print_proxy_notice,
@@ -61,7 +63,13 @@ from gost_trier.xray import (
     xray_tmux_command,
 )
 from gost_trier.native import (
+    Release,
+    ReleaseAsset,
     executable_suffix,
+    find_cached_executable,
+    latest_release,
+    resolve_release_binary,
+    update_release_binary,
     xray_asset_name,
     xray_link_json_asset_name,
 )
@@ -329,6 +337,34 @@ def test_download_file_streams_with_progress(monkeypatch, tmp_path):
     assert updates == [3, 3]
 
 
+def test_download_bytes_error_includes_url(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 403, "rate limit exceeded", {}, None)
+
+    monkeypatch.setattr("gost_trier.downloads.urlopen", fake_urlopen)
+    monkeypatch.setattr("gost_trier.downloads.print_proxy_notice", lambda url: None)
+
+    with pytest.raises(RuntimeError, match=r"failed to download https://example\.com/sub\.txt: HTTP 403: rate limit exceeded"):
+        download_bytes("https://example.com/sub.txt")
+
+
+def test_latest_release_error_includes_url(monkeypatch):
+    latest_release.cache_clear()
+
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 403, "rate limit exceeded", {}, None)
+
+    monkeypatch.setattr("gost_trier.native.urlopen", fake_urlopen)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"failed to fetch latest release metadata from https://api\.github\.com/repos/XTLS/Xray-core/releases/latest: HTTP 403: rate limit exceeded",
+    ):
+        latest_release("XTLS/Xray-core")
+
+    latest_release.cache_clear()
+
+
 def test_download_proxy_for_url_respects_proxy_and_bypass(monkeypatch):
     monkeypatch.setattr("gost_trier.downloads.getproxies", lambda: {"https": "http://127.0.0.1:8080"})
     monkeypatch.setattr("gost_trier.downloads.proxy_bypass", lambda host: host == "localhost")
@@ -355,6 +391,87 @@ def test_redact_proxy_url_leaves_proxy_without_credentials():
 def test_executable_suffix_uses_windows_extension():
     assert executable_suffix("windows") == ".exe"
     assert executable_suffix("linux") == ""
+
+
+def test_find_cached_executable_uses_existing_platform_cache(tmp_path):
+    binary = tmp_path / "v1.0.0" / "linux-amd64" / "xray"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("binary")
+
+    assert find_cached_executable(tmp_path, "linux", "amd64", ["xray"]) == binary
+    assert find_cached_executable(tmp_path, "windows", "amd64", ["xray.exe"]) is None
+
+
+def test_resolve_release_binary_uses_existing_cache_before_github(monkeypatch, tmp_path):
+    binary = tmp_path / "bin" / "xray" / "v1.0.0" / "linux-amd64" / "xray"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("binary")
+
+    monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
+    monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))
+    monkeypatch.setattr("gost_trier.native.shutil.which", lambda name: None)
+    monkeypatch.setattr("gost_trier.native.latest_release", lambda repo: (_ for _ in ()).throw(AssertionError("unexpected GitHub request")))
+
+    resolved = resolve_release_binary(
+        tool="xray",
+        repo="XTLS/Xray-core",
+        executable_names=["xray"],
+        asset_name=lambda tag, goos, goarch: "xray.zip",
+    )
+
+    assert resolved == binary
+
+
+def test_update_release_binary_no_download_reports_latest_without_installing(monkeypatch, tmp_path):
+    monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
+    monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))
+    monkeypatch.setattr(
+        "gost_trier.native.latest_release",
+        lambda repo: Release(
+            tag="v2.0.0",
+            assets=[ReleaseAsset(name="xray.zip", download_url="https://example.com/xray.zip")],
+        ),
+    )
+    monkeypatch.setattr("gost_trier.native.install_release_asset", lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected download")))
+
+    result = update_release_binary(
+        tool="xray",
+        repo="XTLS/Xray-core",
+        executable_names=["xray"],
+        asset_name=lambda tag, goos, goarch: "xray.zip",
+        no_download=True,
+    )
+
+    assert result.tag == "v2.0.0"
+    assert result.asset_name == "xray.zip"
+    assert result.cached is None
+    assert result.installed is None
+    assert result.download_url == "https://example.com/xray.zip"
+
+
+def test_update_release_binary_downloads_missing_latest(monkeypatch, tmp_path):
+    installed = tmp_path / "bin" / "xray" / "v2.0.0" / "linux-amd64" / "xray"
+
+    monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
+    monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))
+    monkeypatch.setattr(
+        "gost_trier.native.latest_release",
+        lambda repo: Release(
+            tag="v2.0.0",
+            assets=[ReleaseAsset(name="xray.zip", download_url="https://example.com/xray.zip")],
+        ),
+    )
+    monkeypatch.setattr("gost_trier.native.install_release_asset", lambda **kwargs: installed)
+
+    result = update_release_binary(
+        tool="xray",
+        repo="XTLS/Xray-core",
+        executable_names=["xray"],
+        asset_name=lambda tag, goos, goarch: "xray.zip",
+    )
+
+    assert result.installed == installed
+    assert result.cached is None
 
 
 def test_substitute_placeholders():
@@ -783,6 +900,19 @@ def test_xray_run_main_accepts_no_progress_before_or_after_subcommand(monkeypatc
     assert progress_values == [False, False]
     assert seen_args == [["-F=direct://"], ["-F=direct://"]]
     assert capsys.readouterr().out == "{}\n{}\n"
+
+
+def test_xray_run_main_update_binaries_accepts_no_download_and_no_progress(monkeypatch):
+    progress_values = []
+    update_calls = []
+
+    monkeypatch.setattr("gost_trier.xray.set_download_progress_enabled", progress_values.append)
+    monkeypatch.setattr("gost_trier.xray.update_binaries", lambda no_download=False: update_calls.append(no_download) or [])
+
+    assert xray_run_main(["update-binaries", "--no-progress", "--no-download"]) == 0
+
+    assert progress_values == [False]
+    assert update_calls == [True]
 
 
 def test_xray_run_main_writes_json_output_file(monkeypatch, tmp_path, capsys):
