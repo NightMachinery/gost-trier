@@ -85,21 +85,23 @@ xray-run exec '-L=socks5://127.0.0.1:1060' '-L=http://user:password@:2060' '-F=v
 
 Xray share links are converted with `Xray-Link-Json`. Discovery order is:
 
-1. `XRAY_LINK_JSON`
-2. `Xray-Link-Json` on `PATH`
-3. cached or downloaded GitHub release binaries from `NightMachinery/Xray-Link-Json`
-4. automatic `go install github.com/NightMachinery/Xray-Link-Json@latest`
-5. the local clone at `~/.base/Xray-Link-Json`
+1. `XRAY_LINK_JSON_BIN`
+2. cached release binaries from `NightMachinery/Xray-Link-Json`
+3. `Xray-Link-Json` on `PATH`
+4. downloaded GitHub release binaries from `NightMachinery/Xray-Link-Json`
+5. automatic `go install github.com/NightMachinery/Xray-Link-Json@latest`
+6. the local clone at `~/.base/Xray-Link-Json`
 
 Xray itself is discovered in this order:
 
 1. `XRAY_BIN`
-2. `xray` on `PATH`
-3. cached or downloaded GitHub release binaries from `XTLS/Xray-core`
+2. cached release binaries from `XTLS/Xray-core`
+3. `xray` on `PATH`
+4. downloaded GitHub release binaries from `XTLS/Xray-core`
 
 Release archive downloads and remote candidate-list downloads show byte progress on stderr by default. Use `--no-progress` to hide progress bars, or `--progress` to make the default explicit. If Python's active proxy settings route a download through a proxy, the first download prints `Using proxy for downloads: ...` with proxy credentials redacted.
 
-Normal `xray-run` and `xray-trier` startup uses an existing `PATH` binary or cached helper binary before making GitHub release API requests. To explicitly check GitHub for newer helper binaries, run `xray-run update-binaries`; add `--no-download` to report the latest available release assets without downloading them.
+Normal `xray-run` and `xray-trier` startup uses an explicit environment override, cached helper binary, or existing `PATH` binary before making GitHub release API requests. To explicitly check GitHub for newer helper binaries, run `xray-run update-binaries`; add `--no-download` to report the latest available release assets without downloading them.
 
 `xray-trier` runs Xray and `Xray-Link-Json` resolution plus native smoke checks once before starting parallel config tests. The checks are cached for the rest of the process, including direct `xray-run` setup calls.
 

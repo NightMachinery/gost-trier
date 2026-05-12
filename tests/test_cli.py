@@ -422,6 +422,50 @@ def test_resolve_release_binary_uses_existing_cache_before_github(monkeypatch, t
     assert resolved == binary
 
 
+def test_resolve_release_binary_prefers_env_over_cache_and_path(monkeypatch, tmp_path):
+    cached = tmp_path / "bin" / "xray" / "v1.0.0" / "linux-amd64" / "xray"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("cached")
+    env_binary = tmp_path / "env-xray"
+    path_binary = tmp_path / "path-xray"
+
+    monkeypatch.setenv("XRAY_BIN", str(env_binary))
+    monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
+    monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))
+    monkeypatch.setattr("gost_trier.native.shutil.which", lambda name: str(path_binary))
+
+    resolved = resolve_release_binary(
+        tool="xray",
+        repo="XTLS/Xray-core",
+        executable_names=["xray"],
+        asset_name=lambda tag, goos, goarch: "xray.zip",
+        env_var="XRAY_BIN",
+    )
+
+    assert resolved == env_binary
+
+
+def test_resolve_release_binary_prefers_cache_over_path(monkeypatch, tmp_path):
+    cached = tmp_path / "bin" / "xray" / "v1.0.0" / "linux-amd64" / "xray"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("cached")
+    path_binary = tmp_path / "path-xray"
+
+    monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
+    monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))
+    monkeypatch.setattr("gost_trier.native.shutil.which", lambda name: str(path_binary))
+    monkeypatch.setattr("gost_trier.native.latest_release", lambda repo: (_ for _ in ()).throw(AssertionError("unexpected GitHub request")))
+
+    resolved = resolve_release_binary(
+        tool="xray",
+        repo="XTLS/Xray-core",
+        executable_names=["xray"],
+        asset_name=lambda tag, goos, goarch: "xray.zip",
+    )
+
+    assert resolved == cached
+
+
 def test_update_release_binary_no_download_reports_latest_without_installing(monkeypatch, tmp_path):
     monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
     monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))

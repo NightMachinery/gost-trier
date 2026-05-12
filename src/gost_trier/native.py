@@ -48,6 +48,15 @@ class BinaryUpdateResult:
     download_url: str
 
 
+@dataclass(frozen=True)
+class ReleaseBinary:
+    tool: str
+    repo: str
+    executable_names: Sequence[str]
+    asset_name: Callable[[str, str, str], str]
+    env_var: str | None = None
+
+
 def system_arch() -> tuple[str, str]:
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -108,17 +117,16 @@ def resolve_release_binary(
         if env_path:
             return Path(env_path)
 
-    for name in executable_names:
-        path_binary = shutil.which(name)
-        if path_binary:
-            return Path(path_binary)
-
     with _RESOLVE_LOCK:
         goos, goarch = system_arch()
         platform_cache_dir = DEFAULT_CACHE_ROOT / "bin" / tool
         cached = find_cached_executable(platform_cache_dir, goos, goarch, executable_names)
         if cached is not None:
             return cached
+
+        path_binary = find_path_executable(executable_names)
+        if path_binary is not None:
+            return path_binary
 
         release = latest_release(repo)
         cache_dir = platform_cache_dir / release.tag / f"{goos}-{goarch}"
@@ -139,6 +147,16 @@ def resolve_release_binary(
             cache_dir=cache_dir,
             executable_names=executable_names,
         )
+
+
+def locate_release_binary(binary: ReleaseBinary) -> Path:
+    return resolve_release_binary(
+        tool=binary.tool,
+        repo=binary.repo,
+        executable_names=binary.executable_names,
+        asset_name=binary.asset_name,
+        env_var=binary.env_var,
+    )
 
 
 def update_release_binary(
@@ -181,6 +199,16 @@ def update_release_binary(
         cached=None,
         installed=installed,
         download_url=asset.download_url,
+    )
+
+
+def update_release_binary_from_spec(binary: ReleaseBinary, *, no_download: bool = False) -> BinaryUpdateResult:
+    return update_release_binary(
+        tool=binary.tool,
+        repo=binary.repo,
+        executable_names=binary.executable_names,
+        asset_name=binary.asset_name,
+        no_download=no_download,
     )
 
 
@@ -244,6 +272,14 @@ def find_executable(root: Path, executable_names: Sequence[str]) -> Path | None:
     return None
 
 
+def find_path_executable(executable_names: Sequence[str]) -> Path | None:
+    for name in executable_names:
+        path_binary = shutil.which(name)
+        if path_binary:
+            return Path(path_binary)
+    return None
+
+
 def find_cached_executable(root: Path, goos: str, goarch: str, executable_names: Sequence[str]) -> Path | None:
     if not root.exists():
         return None
@@ -284,31 +320,20 @@ def xray_asset_name(tag: str, goos: str, goarch: str) -> str:
     raise RuntimeError(f"unsupported Xray platform: {goos}/{goarch}")
 
 
-def locate_xray_link_json() -> Path:
+def xray_link_json_binary() -> ReleaseBinary:
     suffix = executable_suffix()
-    return resolve_release_binary(
+    return ReleaseBinary(
         tool="Xray-Link-Json",
         repo="NightMachinery/Xray-Link-Json",
         executable_names=[f"Xray-Link-Json{suffix}", "Xray-Link-Json"],
         asset_name=xray_link_json_asset_name,
-        env_var="XRAY_LINK_JSON",
+        env_var="XRAY_LINK_JSON_BIN",
     )
 
 
-def update_xray_link_json(*, no_download: bool = False) -> BinaryUpdateResult:
+def xray_binary() -> ReleaseBinary:
     suffix = executable_suffix()
-    return update_release_binary(
-        tool="Xray-Link-Json",
-        repo="NightMachinery/Xray-Link-Json",
-        executable_names=[f"Xray-Link-Json{suffix}", "Xray-Link-Json"],
-        asset_name=xray_link_json_asset_name,
-        no_download=no_download,
-    )
-
-
-def locate_xray() -> Path:
-    suffix = executable_suffix()
-    return resolve_release_binary(
+    return ReleaseBinary(
         tool="xray",
         repo="XTLS/Xray-core",
         executable_names=[f"xray{suffix}", "xray"],
@@ -317,12 +342,17 @@ def locate_xray() -> Path:
     )
 
 
+def locate_xray_link_json() -> Path:
+    return locate_release_binary(xray_link_json_binary())
+
+
+def update_xray_link_json(*, no_download: bool = False) -> BinaryUpdateResult:
+    return update_release_binary_from_spec(xray_link_json_binary(), no_download=no_download)
+
+
+def locate_xray() -> Path:
+    return locate_release_binary(xray_binary())
+
+
 def update_xray(*, no_download: bool = False) -> BinaryUpdateResult:
-    suffix = executable_suffix()
-    return update_release_binary(
-        tool="xray",
-        repo="XTLS/Xray-core",
-        executable_names=[f"xray{suffix}", "xray"],
-        asset_name=xray_asset_name,
-        no_download=no_download,
-    )
+    return update_release_binary_from_spec(xray_binary(), no_download=no_download)

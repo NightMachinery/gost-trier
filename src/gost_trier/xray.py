@@ -125,17 +125,9 @@ def locate_converter(verbose: int = 0) -> list[str]:
 
 
 def resolve_converter_command(verbose: int = 0) -> list[str]:
-    env_path = os.environ.get("XRAY_LINK_JSON")
-    if env_path:
-        verbose_log(verbose, 1, f"using Xray-Link-Json from XRAY_LINK_JSON: {env_path}")
-        return [env_path]
-    path_binary = shutil.which("Xray-Link-Json")
-    if path_binary:
-        verbose_log(verbose, 1, f"using Xray-Link-Json from PATH: {path_binary}")
-        return [path_binary]
     try:
         command = [str(locate_xray_link_json())]
-        verbose_log(verbose, 1, f"using cached/downloaded Xray-Link-Json: {command[0]}")
+        verbose_log(verbose, 1, f"using Xray-Link-Json: {command[0]}")
         return command
     except Exception as release_exc:
         print(f"xray-run: release install for Xray-Link-Json failed: {release_exc}", file=sys.stderr)
@@ -157,13 +149,13 @@ def resolve_converter_command(verbose: int = 0) -> list[str]:
             errors="replace",
         )
         return [str(DEFAULT_CONVERTER_CACHE)]
-    raise FileNotFoundError("Xray-Link-Json not found; set XRAY_LINK_JSON or install it on PATH")
+    raise FileNotFoundError("Xray-Link-Json not found; set XRAY_LINK_JSON_BIN or install it on PATH")
 
 
 def install_converter() -> None:
     if not shutil.which("go"):
         raise FileNotFoundError(
-            "Xray-Link-Json was not found and automatic release download failed; install Go or set XRAY_LINK_JSON"
+            "Xray-Link-Json was not found and automatic release download failed; install Go or set XRAY_LINK_JSON_BIN"
         )
     print("xray-run: installing Xray-Link-Json with go install", file=sys.stderr)
     subprocess.run(
