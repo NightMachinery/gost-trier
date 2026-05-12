@@ -55,6 +55,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "socksio" },
     { name = "textual" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "tqdm" },
 ]
 
@@ -69,6 +70,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "socksio", specifier = ">=1.0.0" },
     { name = "textual", specifier = ">=0.89.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
 ]
 

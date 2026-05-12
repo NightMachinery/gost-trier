@@ -1,0 +1,8 @@
+[xray]
+repo = "XTLS/Xray-core"
+env_var = "XRAY_BIN"
+
+[Xray-Link-Json]
+repo = "NightMachinery/Xray-Link-Json"
+env_var = "XRAY_LINK_JSON_BIN"
+min_version = "v0.2.1"

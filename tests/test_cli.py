@@ -87,11 +87,15 @@ from gost_trier.xray_tui import (
 from gost_trier.native import (
     Release,
     ReleaseAsset,
+    external_deps,
     executable_suffix,
     find_cached_executable,
     latest_release,
+    locate_xray_link_json,
+    parse_semver_tag,
     resolve_release_binary,
     update_release_binary,
+    version_satisfies,
     xray_asset_name,
     xray_link_json_asset_name,
 )
@@ -387,6 +391,24 @@ def test_latest_release_error_includes_url(monkeypatch):
     latest_release.cache_clear()
 
 
+def test_external_deps_declares_xray_link_json_minimum():
+    external_deps.cache_clear()
+    deps = external_deps()
+
+    assert deps["Xray-Link-Json"]["repo"] == "NightMachinery/Xray-Link-Json"
+    assert deps["Xray-Link-Json"]["env_var"] == "XRAY_LINK_JSON_BIN"
+    assert deps["Xray-Link-Json"]["min_version"] == "v0.2.1"
+    assert deps["xray"]["repo"] == "XTLS/Xray-core"
+
+
+def test_version_satisfies_semver_tags():
+    assert parse_semver_tag("Xray-Link-Json v0.2.1") == (0, 2, 1)
+    assert version_satisfies("v0.2.1", "v0.2.1")
+    assert version_satisfies("0.2.2", "v0.2.1")
+    assert not version_satisfies("v0.2.0", "v0.2.1")
+    assert not version_satisfies("Xray-Link-Json dev", "v0.2.1")
+
+
 def test_download_proxy_for_url_respects_proxy_and_bypass(monkeypatch):
     monkeypatch.setattr("gost_trier.downloads.getproxies", lambda: {"https": "http://127.0.0.1:8080"})
     monkeypatch.setattr("gost_trier.downloads.proxy_bypass", lambda host: host == "localhost")
@@ -422,6 +444,20 @@ def test_find_cached_executable_uses_existing_platform_cache(tmp_path):
 
     assert find_cached_executable(tmp_path, "linux", "amd64", ["xray"]) == binary
     assert find_cached_executable(tmp_path, "windows", "amd64", ["xray.exe"]) is None
+
+
+def test_find_cached_executable_skips_cache_below_min_version(tmp_path):
+    old_binary = tmp_path / "v0.2.0" / "linux-amd64" / "Xray-Link-Json"
+    old_binary.parent.mkdir(parents=True)
+    old_binary.write_text("old")
+    new_binary = tmp_path / "v0.2.1" / "linux-amd64" / "Xray-Link-Json"
+    new_binary.parent.mkdir(parents=True)
+    new_binary.write_text("new")
+
+    assert (
+        find_cached_executable(tmp_path, "linux", "amd64", ["Xray-Link-Json"], min_version="v0.2.1")
+        == new_binary
+    )
 
 
 def test_resolve_release_binary_uses_existing_cache_before_github(monkeypatch, tmp_path):
@@ -486,6 +522,98 @@ def test_resolve_release_binary_prefers_cache_over_path(monkeypatch, tmp_path):
     )
 
     assert resolved == cached
+
+
+def test_resolve_release_binary_skips_old_path_binary_and_downloads(monkeypatch, tmp_path, capsys):
+    path_binary = tmp_path / "path-Xray-Link-Json"
+    installed = tmp_path / "installed-Xray-Link-Json"
+
+    monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
+    monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))
+    monkeypatch.setattr("gost_trier.native.shutil.which", lambda name: str(path_binary))
+    monkeypatch.setattr(
+        "gost_trier.native.subprocess_run_version",
+        lambda path: subprocess.CompletedProcess([str(path), "--version"], 0, stdout="Xray-Link-Json v0.2.0\n", stderr=""),
+    )
+    monkeypatch.setattr(
+        "gost_trier.native.latest_release",
+        lambda repo: Release(
+            tag="v0.2.1",
+            assets=[ReleaseAsset(name="Xray-Link-Json_v0.2.1_linux_amd64.tar.gz", download_url="https://example.com/xlj.tgz")],
+        ),
+    )
+    monkeypatch.setattr("gost_trier.native.install_release_asset", lambda **kwargs: installed)
+
+    resolved = resolve_release_binary(
+        tool="Xray-Link-Json",
+        repo="NightMachinery/Xray-Link-Json",
+        executable_names=["Xray-Link-Json"],
+        asset_name=xray_link_json_asset_name,
+        min_version="v0.2.1",
+    )
+
+    assert resolved == installed
+    assert "ignoring PATH binary" in capsys.readouterr().err
+
+
+def test_resolve_release_binary_allows_dev_path_binary_with_warning(monkeypatch, tmp_path, capsys):
+    path_binary = tmp_path / "path-Xray-Link-Json"
+
+    monkeypatch.setattr("gost_trier.native.DEFAULT_CACHE_ROOT", tmp_path)
+    monkeypatch.setattr("gost_trier.native.system_arch", lambda: ("linux", "amd64"))
+    monkeypatch.setattr("gost_trier.native.shutil.which", lambda name: str(path_binary))
+    monkeypatch.setattr(
+        "gost_trier.native.subprocess_run_version",
+        lambda path: subprocess.CompletedProcess([str(path), "--version"], 0, stdout="Xray-Link-Json dev\n", stderr=""),
+    )
+    monkeypatch.setattr("gost_trier.native.latest_release", lambda repo: (_ for _ in ()).throw(AssertionError("unexpected GitHub request")))
+
+    resolved = resolve_release_binary(
+        tool="Xray-Link-Json",
+        repo="NightMachinery/Xray-Link-Json",
+        executable_names=["Xray-Link-Json"],
+        asset_name=xray_link_json_asset_name,
+        min_version="v0.2.1",
+    )
+
+    assert resolved == path_binary
+    assert "reports a dev version" in capsys.readouterr().err
+
+
+def test_resolve_release_binary_warns_but_uses_old_env_override(monkeypatch, tmp_path, capsys):
+    env_binary = tmp_path / "env-Xray-Link-Json"
+
+    monkeypatch.setenv("XRAY_LINK_JSON_BIN", str(env_binary))
+    monkeypatch.setattr(
+        "gost_trier.native.subprocess_run_version",
+        lambda path: subprocess.CompletedProcess([str(path), "--version"], 0, stdout="Xray-Link-Json v0.2.0\n", stderr=""),
+    )
+
+    resolved = resolve_release_binary(
+        tool="Xray-Link-Json",
+        repo="NightMachinery/Xray-Link-Json",
+        executable_names=["Xray-Link-Json"],
+        asset_name=xray_link_json_asset_name,
+        env_var="XRAY_LINK_JSON_BIN",
+        min_version="v0.2.1",
+    )
+
+    assert resolved == env_binary
+    assert "does not satisfy minimum v0.2.1" in capsys.readouterr().err
+
+
+def test_locate_xray_link_json_uses_external_dependency_minimum(monkeypatch):
+    seen = {}
+
+    def fake_resolve(**kwargs):
+        seen.update(kwargs)
+        return Path("/tmp/Xray-Link-Json")
+
+    monkeypatch.setattr("gost_trier.native.resolve_release_binary", fake_resolve)
+
+    assert locate_xray_link_json() == Path("/tmp/Xray-Link-Json")
+    assert seen["repo"] == "NightMachinery/Xray-Link-Json"
+    assert seen["min_version"] == "v0.2.1"
 
 
 def test_update_release_binary_no_download_reports_latest_without_installing(monkeypatch, tmp_path):

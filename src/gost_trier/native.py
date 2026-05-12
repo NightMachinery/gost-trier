@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import sys
@@ -12,12 +13,18 @@ import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from importlib import resources
 from pathlib import Path
 from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .downloads import download_file, url_error_message
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 
 GITHUB_API = "https://api.github.com/repos"
@@ -55,6 +62,7 @@ class ReleaseBinary:
     executable_names: Sequence[str]
     asset_name: Callable[[str, str, str], str]
     env_var: str | None = None
+    min_version: str | None = None
 
 
 def system_arch() -> tuple[str, str]:
@@ -104,6 +112,23 @@ def latest_release(repo: str) -> Release:
     return Release(tag=payload["tag_name"], assets=assets)
 
 
+@lru_cache(maxsize=1)
+def external_deps() -> dict[str, dict[str, str]]:
+    with resources.files("gost_trier").joinpath("external_deps.toml").open("rb") as handle:
+        payload = tomllib.load(handle)
+    if not isinstance(payload, dict):
+        raise RuntimeError("external_deps.toml must contain dependency tables")
+    deps: dict[str, dict[str, str]] = {}
+    for tool, raw_spec in payload.items():
+        if not isinstance(raw_spec, dict):
+            raise RuntimeError(f"external_deps.toml dependency must be a table: {tool}")
+        spec = {key: value for key, value in raw_spec.items() if isinstance(key, str) and isinstance(value, str)}
+        if not spec.get("repo"):
+            raise RuntimeError(f"external_deps.toml dependency missing repo: {tool}")
+        deps[tool] = spec
+    return deps
+
+
 def resolve_release_binary(
     *,
     tool: str,
@@ -111,24 +136,30 @@ def resolve_release_binary(
     executable_names: Sequence[str],
     asset_name: Callable[[str, str, str], str],
     env_var: str | None = None,
+    min_version: str | None = None,
 ) -> Path:
     if env_var:
         env_path = os.environ.get(env_var)
         if env_path:
-            return Path(env_path)
+            path = Path(env_path)
+            warn_if_binary_version_unsatisfied(tool, path, min_version, source=f"{env_var} override")
+            return path
 
     with _RESOLVE_LOCK:
         goos, goarch = system_arch()
         platform_cache_dir = DEFAULT_CACHE_ROOT / "bin" / tool
-        cached = find_cached_executable(platform_cache_dir, goos, goarch, executable_names)
+        cached = find_cached_executable(platform_cache_dir, goos, goarch, executable_names, min_version=min_version)
         if cached is not None:
             return cached
 
         path_binary = find_path_executable(executable_names)
         if path_binary is not None:
-            return path_binary
+            if binary_version_satisfies(tool, path_binary, min_version):
+                return path_binary
+            warn_binary_version_unsatisfied(tool, path_binary, min_version, source="PATH")
 
         release = latest_release(repo)
+        require_release_version(tool, release.tag, min_version)
         cache_dir = platform_cache_dir / release.tag / f"{goos}-{goarch}"
         cached = find_executable(cache_dir, executable_names)
         if cached is not None:
@@ -156,6 +187,7 @@ def locate_release_binary(binary: ReleaseBinary) -> Path:
         executable_names=binary.executable_names,
         asset_name=binary.asset_name,
         env_var=binary.env_var,
+        min_version=binary.min_version,
     )
 
 
@@ -165,10 +197,12 @@ def update_release_binary(
     repo: str,
     executable_names: Sequence[str],
     asset_name: Callable[[str, str, str], str],
+    min_version: str | None = None,
     no_download: bool = False,
 ) -> BinaryUpdateResult:
     goos, goarch = system_arch()
     release = latest_release(repo)
+    require_release_version(tool, release.tag, min_version)
     cache_dir = DEFAULT_CACHE_ROOT / "bin" / tool / release.tag / f"{goos}-{goarch}"
     cached = find_executable(cache_dir, executable_names)
     wanted_name = asset_name(release.tag, goos, goarch)
@@ -208,6 +242,7 @@ def update_release_binary_from_spec(binary: ReleaseBinary, *, no_download: bool 
         repo=binary.repo,
         executable_names=binary.executable_names,
         asset_name=binary.asset_name,
+        min_version=binary.min_version,
         no_download=no_download,
     )
 
@@ -280,15 +315,120 @@ def find_path_executable(executable_names: Sequence[str]) -> Path | None:
     return None
 
 
-def find_cached_executable(root: Path, goos: str, goarch: str, executable_names: Sequence[str]) -> Path | None:
+def find_cached_executable(
+    root: Path,
+    goos: str,
+    goarch: str,
+    executable_names: Sequence[str],
+    *,
+    min_version: str | None = None,
+) -> Path | None:
     if not root.exists():
         return None
     platform_suffix = f"{goos}-{goarch}"
-    for cache_dir in sorted(root.glob(f"*/{platform_suffix}"), reverse=True):
+    cache_dirs = sorted(root.glob(f"*/{platform_suffix}"), key=lambda path: parse_semver_tag(path.parent.name) or (-1, -1, -1), reverse=True)
+    for cache_dir in cache_dirs:
+        tag = cache_dir.parent.name
+        if not version_satisfies(tag, min_version):
+            continue
         binary = find_executable(cache_dir, executable_names)
         if binary is not None:
             return binary
     return None
+
+
+def parse_semver_tag(value: str | None) -> tuple[int, int, int] | None:
+    if not value:
+        return None
+    match = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)\b", value)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def is_dev_version(value: str | None) -> bool:
+    return bool(value and re.search(r"\bdev\b", value, flags=re.IGNORECASE))
+
+
+def version_satisfies(version: str | None, min_version: str | None) -> bool:
+    if not min_version:
+        return True
+    parsed_version = parse_semver_tag(version)
+    parsed_min = parse_semver_tag(min_version)
+    if parsed_min is None:
+        raise RuntimeError(f"invalid minimum version: {min_version}")
+    if parsed_version is None:
+        return False
+    return parsed_version >= parsed_min
+
+
+def binary_version_output(path: Path) -> str | None:
+    try:
+        completed = subprocess_run_version(path)
+    except Exception:
+        return None
+    output = "\n".join(part for part in [completed.stdout, completed.stderr] if part)
+    if completed.returncode != 0:
+        return output or None
+    return output or None
+
+
+def subprocess_run_version(path: Path):
+    import subprocess
+
+    return subprocess.run(
+        [str(path), "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+
+
+def binary_version_satisfies(tool: str, path: Path, min_version: str | None) -> bool:
+    if not min_version:
+        return True
+    output = binary_version_output(path)
+    if is_dev_version(output):
+        print(f"{tool}: warning: {path} reports a dev version; required minimum {min_version} cannot be verified", file=sys.stderr)
+        return True
+    return version_satisfies(output, min_version)
+
+
+def warn_if_binary_version_unsatisfied(tool: str, path: Path, min_version: str | None, *, source: str) -> None:
+    if not min_version:
+        return
+    output = binary_version_output(path)
+    if is_dev_version(output):
+        print(f"{tool}: warning: {source} {path} reports a dev version; required minimum {min_version} cannot be verified", file=sys.stderr)
+        return
+    if not version_satisfies(output, min_version):
+        detail = first_line(output) or "version unavailable"
+        print(f"{tool}: warning: {source} {path} does not satisfy minimum {min_version}: {detail}", file=sys.stderr)
+
+
+def warn_binary_version_unsatisfied(tool: str, path: Path, min_version: str | None, *, source: str) -> None:
+    if not min_version:
+        return
+    output = binary_version_output(path)
+    detail = first_line(output) or "version unavailable"
+    print(f"{tool}: warning: ignoring {source} binary {path}; requires at least {min_version}: {detail}", file=sys.stderr)
+
+
+def first_line(value: str | None) -> str | None:
+    if not value:
+        return None
+    for line in value.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def require_release_version(tool: str, tag: str, min_version: str | None) -> None:
+    if not version_satisfies(tag, min_version):
+        raise RuntimeError(f"{tool} latest release {tag} is lower than required minimum {min_version}")
 
 
 def make_executable(path: Path) -> None:
@@ -322,23 +462,27 @@ def xray_asset_name(tag: str, goos: str, goarch: str) -> str:
 
 def xray_link_json_binary() -> ReleaseBinary:
     suffix = executable_suffix()
+    spec = external_deps()["Xray-Link-Json"]
     return ReleaseBinary(
         tool="Xray-Link-Json",
-        repo="NightMachinery/Xray-Link-Json",
+        repo=spec["repo"],
         executable_names=[f"Xray-Link-Json{suffix}", "Xray-Link-Json"],
         asset_name=xray_link_json_asset_name,
-        env_var="XRAY_LINK_JSON_BIN",
+        env_var=spec.get("env_var"),
+        min_version=spec.get("min_version"),
     )
 
 
 def xray_binary() -> ReleaseBinary:
     suffix = executable_suffix()
+    spec = external_deps()["xray"]
     return ReleaseBinary(
         tool="xray",
-        repo="XTLS/Xray-core",
+        repo=spec["repo"],
         executable_names=[f"xray{suffix}", "xray"],
         asset_name=xray_asset_name,
-        env_var="XRAY_BIN",
+        env_var=spec.get("env_var"),
+        min_version=spec.get("min_version"),
     )
 
 

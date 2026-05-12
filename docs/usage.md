@@ -84,14 +84,16 @@ The `xray-run` interface accepts the same `-L` and `-F` shapes used in the examp
 xray-run exec '-L=socks5://127.0.0.1:1060' '-L=http://user:password@:2060' '-F=vless://...'
 ```
 
-Xray share links are converted with `Xray-Link-Json`. Discovery order is:
+Xray share links are converted with `Xray-Link-Json`. External binary metadata is declared in `src/gost_trier/external_deps.toml`; `Xray-Link-Json` requires at least `v0.2.1`, which includes support for bare proxy forwards such as `socks5://127.0.0.1:10050`. Discovery order is:
 
 1. `XRAY_LINK_JSON_BIN`
-2. cached release binaries from `NightMachinery/Xray-Link-Json`
-3. `Xray-Link-Json` on `PATH`
+2. cached release binaries from `NightMachinery/Xray-Link-Json` that satisfy the configured minimum version
+3. `Xray-Link-Json` on `PATH` if `--version` satisfies the configured minimum, or reports `dev`
 4. downloaded GitHub release binaries from `NightMachinery/Xray-Link-Json`
 5. automatic `go install github.com/NightMachinery/Xray-Link-Json@latest`
 6. the local clone at `~/.base/Xray-Link-Json`
+
+Environment overrides are trusted and used even when their version is old or unverifiable; `xray-run` prints a warning in that case. A `dev` version also prints a warning but is allowed.
 
 Xray itself is discovered in this order:
 
