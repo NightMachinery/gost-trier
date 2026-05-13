@@ -95,6 +95,8 @@ Xray share links are converted with `Xray-Link-Json`. External binary metadata i
 
 Environment overrides are trusted and used even when their version is old or unverifiable; `xray-run` prints a warning in that case. A `dev` version also prints a warning but is allowed.
 
+Some converters and older share links omit the VLESS user `encryption` field. Current Xray releases require it, so `xray-run` normalizes VLESS users to `encryption: "none"` when the field is absent.
+
 Xray itself is discovered in this order:
 
 1. `XRAY_BIN`

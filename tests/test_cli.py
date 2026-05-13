@@ -957,6 +957,31 @@ def test_normalize_outbound_removes_send_through():
     assert outbound == {"protocol": "trojan", "settings": {}}
 
 
+def test_normalize_outbound_adds_vless_encryption_none():
+    outbound = normalize_outbound(
+        {
+            "protocol": "vless",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": "example.com",
+                        "users": [
+                            {"id": "missing"},
+                            {"id": "explicit", "encryption": "none"},
+                        ],
+                    }
+                ]
+            },
+        }
+    )
+
+    users = outbound["settings"]["vnext"][0]["users"]
+    assert users == [
+        {"id": "missing", "encryption": "none"},
+        {"id": "explicit", "encryption": "none"},
+    ]
+
+
 def test_parse_converter_json_ignores_surrounding_output():
     assert parse_converter_json('warn\n{"outbounds": []}\nextra') == {"outbounds": []}
 

@@ -253,8 +253,22 @@ def parse_converter_json(stdout: str) -> dict[str, Any]:
 
 
 def normalize_outbound(outbound: dict[str, Any]) -> dict[str, Any]:
-    cleaned = dict(outbound)
+    cleaned = copy.deepcopy(outbound)
     cleaned.pop("sendThrough", None)
+    if cleaned.get("protocol") == "vless":
+        settings = cleaned.get("settings")
+        if isinstance(settings, dict):
+            vnext = settings.get("vnext")
+            if isinstance(vnext, list):
+                for server in vnext:
+                    if not isinstance(server, dict):
+                        continue
+                    users = server.get("users")
+                    if not isinstance(users, list):
+                        continue
+                    for user in users:
+                        if isinstance(user, dict) and "encryption" not in user:
+                            user["encryption"] = "none"
     return cleaned
 
 
