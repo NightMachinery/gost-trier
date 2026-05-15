@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-from .common import free_port, is_successful_test, normalize_split_url_args, test_url, wait_for_port
+from .common import TrierOptions, free_port, is_successful_test, normalize_split_url_args, test_url, wait_for_port
 from .sessions import run_managed_session
 
 
@@ -147,10 +147,12 @@ def tmux_install_commands() -> list[list[str]]:
     ]
 
 
-def run_gost_in_tmux(session: str, results: Sequence[dict[str, Any]], run_top: int) -> None:
+def run_gost_in_tmux(session: str, results: Sequence[dict[str, Any]], options: TrierOptions) -> None:
     if not results:
         print("No working configs found; skipping tmux launch", file=sys.stderr)
         return
+    run_top = options.run_top
+    print_selected_results(results[:run_top], options, label="gost")
     launched: list[list[str]] = []
     for index, result in enumerate(results[:run_top], start=1):
         config = list(result["config"])
@@ -170,6 +172,48 @@ def run_gost_in_tmux(session: str, results: Sequence[dict[str, Any]], run_top: i
     for index, config in enumerate(launched, start=1):
         subprocess.run(tmux_command(session, f"gost-{index}", config), check=True)
     print_tmux_launch_info(session, launched, command_name="gost")
+
+
+def print_selected_results(results: Sequence[dict[str, Any]], options: TrierOptions, *, label: str) -> None:
+    print(f"selected {label} config(s):", file=sys.stderr)
+    for index, result in enumerate(results, start=1):
+        print(
+            f"  #{index}: loss={format_metric(result.get('loss'))} "
+            f"avg={format_metric(result.get('avg-delay-ms'))} ms "
+            f"std={format_metric(result.get('std-delay-ms'))} ms "
+            f"success-rate={format_metric(result.get('success-rate'))} "
+            f"success={result.get('success-count', '?')}/{result.get('test-count', '?')} "
+            f"top-n={options.top_n} test-n={options.test_n} run-top={options.run_top}",
+            file=sys.stderr,
+        )
+        for link in forward_args(result.get("config", [])):
+            print(f"    link: {link}", file=sys.stderr)
+
+
+def format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def forward_args(args: Sequence[str]) -> list[str]:
+    args = normalize_split_url_args(args)
+    forwards: list[str] = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            forwards.append(arg)
+            skip_next = False
+            continue
+        if arg == "-F":
+            skip_next = True
+        elif arg.startswith("-F="):
+            forwards.append(arg.split("=", 1)[1])
+    if forwards:
+        return forwards
+    return [" ".join(shlex.quote(part) for part in args)]
 
 
 def print_tmux_launch_info(session: str, configs: Sequence[Sequence[str]], *, command_name: str, managed: bool = False) -> None:

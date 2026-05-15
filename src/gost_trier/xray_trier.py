@@ -15,6 +15,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prog="xray-trier",
             description="Try Xray configs by replacing MAGIC_FILE_N placeholders from text files.",
             default_jobs=50,
+            balancer_strategies=["random", "roundRobin", "leastPing", "leastLoad"],
         )
         return run_trier(
             options,

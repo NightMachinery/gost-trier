@@ -125,14 +125,32 @@ uv run gost-trier --run-in-tmux=gost --run-top=3 trojan.txt -- '-L=socks5://127.
 uv run xray-trier --run-in-tmux=xray --run-top=3 trojan.txt -- '-L=socks5://127.0.0.1:1050' '-F=MAGIC_FILE_1'
 ```
 
-When `--run-in-tmux` is used, the command prints the tmux session name, an attach command when tmux is available, and curl commands for testing the launched listeners. On Windows these test commands use `curl.exe` to avoid PowerShell aliases. If `tmux` is missing, it attempts a best-effort install using the available system package manager, including common Linux package managers, Homebrew on macOS, and Scoop/Chocolatey/Winget on Windows. If tmux still is not available, it falls back to managed detached processes. Reusing the same session name cleans up previously managed processes for that session before launching new ones.
+After the initial scan, both triers confirm the fastest successful configs before sorting the final output. The defaults are `--top-n=20` and `--test-n=10`; both are clamped to the number of working configs found. Confirmation reuses the first successful scan as trial 1, then sorts confirmed configs by `loss`:
 
-Progress is written to stderr. The final JSON output is a JSON array sorted by `best-delay-ms`:
+```text
+loss = (avg-delay-ms + --loss-std-weight * std-delay-ms) / success-rate
+```
+
+`--loss-std-weight` defaults to `0.2`. `--min-success-rate=0.7` is a soft threshold: if at least one confirmed config meets it, lower-success configs receive an `unselected-penalty` of `1000000` added to their loss; if none meet it, any positive success rate is allowed.
+
+When `--run-in-tmux` is used, the command first prints the selected config links plus loss, average delay, stddev, success counts, `top-n`, `test-n`, and `run-top`. It then prints the tmux session name, an attach command when tmux is available, and curl commands for testing the launched listeners. On Windows these test commands use `curl.exe` to avoid PowerShell aliases. If `tmux` is missing, it attempts a best-effort install using the available system package manager, including common Linux package managers, Homebrew on macOS, and Scoop/Chocolatey/Winget on Windows. If tmux still is not available, it falls back to managed detached processes. Reusing the same session name cleans up previously managed processes for that session before launching new ones.
+
+`--run-top` defaults to `5`. For `xray-trier`, `--run-top=1` launches one config normally. When `--run-top` is greater than 1, `xray-trier` launches one Xray process with the selected configs in an Xray balancer pool. The default is `--balancer-strategy=leastLoad`; accepted values are `random`, `roundRobin`, `leastPing`, and `leastLoad`. `leastPing` and `leastLoad` include `burstObservatory` in the generated Xray config. `gost-trier` does not have a balancer mode; `--run-top` launches separate gost processes, so fixed `-L` listener ports can conflict.
+
+Progress is written to stderr. The final JSON output is a JSON array sorted by confirmed `loss` for the confirmed top configs, followed by any unconfirmed working configs:
 
 ```json
 [
   {
     "best-delay-ms": 312,
+    "loss": 318.5,
+    "avg-delay-ms": 315,
+    "std-delay-ms": 17.5,
+    "success-rate": 1.0,
+    "success-count": 10,
+    "failure-count": 0,
+    "test-count": 10,
+    "confirmed": true,
     "config": ["-L=socks5://127.0.0.1:1050", "-F=..."],
     "tests": [
       {

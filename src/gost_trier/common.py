@@ -5,6 +5,7 @@ import base64
 import binascii
 import itertools
 import json
+import math
 import random
 import shutil
 import socket
@@ -49,6 +50,11 @@ class TrierOptions:
     sample: int | None
     run_in_tmux: str | None
     run_top: int
+    top_n: int
+    test_n: int
+    loss_std_weight: float
+    min_success_rate: float
+    balancer_strategy: str | None
     verbose: int
     output: str
     progress: bool
@@ -76,6 +82,7 @@ def parse_trier_args(
     prog: str,
     description: str,
     default_jobs: int = 1,
+    balancer_strategies: Sequence[str] | None = None,
 ) -> TrierOptions:
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -91,7 +98,18 @@ def parse_trier_args(
     parser.add_argument("--enough-delay-ms", type=float, help="stop submitting new configs after finding this latency or lower")
     parser.add_argument("--sample", type=int, metavar="N", help="randomly sample N expanded configs; implies --shuffle")
     parser.add_argument("--run-in-tmux", metavar="SESSION", help="launch the fastest working configs in this tmux session")
-    parser.add_argument("--run-top", type=int, default=1, help="number of working configs to launch with --run-in-tmux")
+    parser.add_argument("--run-top", type=int, default=5, help="number of working configs to launch with --run-in-tmux")
+    parser.add_argument("--top-n", type=int, default=20, help="number of fastest initial successes to confirm")
+    parser.add_argument("--test-n", type=int, default=10, help="total confirmation trials per top config")
+    parser.add_argument("--loss-std-weight", type=float, default=0.2, help="weight for latency stddev in confirmation loss")
+    parser.add_argument("--min-success-rate", type=float, default=0.7, help="soft minimum success rate for selection")
+    if balancer_strategies is not None:
+        parser.add_argument(
+            "--balancer-strategy",
+            choices=list(balancer_strategies),
+            default="leastLoad",
+            help="Xray balancer strategy for --run-in-tmux --run-top > 1",
+        )
     parser.add_argument("-v", "--verbose", action="count", default=0, help="increase diagnostic output; repeat for more detail")
     parser.add_argument("-o", "--output", default="-", help="write final JSON to this file, or - for stdout")
     parser.add_argument("--progress", dest="progress", action="store_true", help="show download progress bars")
@@ -117,6 +135,14 @@ def parse_trier_args(
         parser.error("--sample must be >= 1")
     if namespace.run_top < 1:
         parser.error("--run-top must be >= 1")
+    if namespace.top_n < 1:
+        parser.error("--top-n must be >= 1")
+    if namespace.test_n < 1:
+        parser.error("--test-n must be >= 1")
+    if namespace.loss_std_weight < 0:
+        parser.error("--loss-std-weight must be >= 0")
+    if not 0 < namespace.min_success_rate <= 1:
+        parser.error("--min-success-rate must be > 0 and <= 1")
 
     return TrierOptions(
         files=namespace.files,
@@ -129,6 +155,11 @@ def parse_trier_args(
         sample=namespace.sample,
         run_in_tmux=namespace.run_in_tmux,
         run_top=namespace.run_top,
+        top_n=namespace.top_n,
+        test_n=namespace.test_n,
+        loss_std_weight=namespace.loss_std_weight,
+        min_success_rate=namespace.min_success_rate,
+        balancer_strategy=getattr(namespace, "balancer_strategy", None),
         verbose=namespace.verbose,
         output=namespace.output,
         progress=namespace.progress,
@@ -322,7 +353,7 @@ def is_successful_test(test: dict[str, Any]) -> bool:
 
 
 TestRunner = Callable[[Sequence[str], Sequence[str], float, int], dict[str, Any] | None]
-TmuxRunner = Callable[[str, Sequence[dict[str, Any]], int], None]
+TmuxRunner = Callable[[str, Sequence[dict[str, Any]], TrierOptions], None]
 PreflightRunner = Callable[[TrierOptions], None]
 
 
@@ -371,8 +402,9 @@ def run_trier(
                     break
 
     results.sort(key=lambda item: item["best-delay-ms"])
+    results = confirm_top_results(results, options, run_test)
     if options.run_in_tmux:
-        run_tmux(options.run_in_tmux, results, options.run_top)
+        run_tmux(options.run_in_tmux, results, options)
     write_json_output(results, options.output)
     return 0
 
@@ -435,6 +467,159 @@ def run_parallel_tests(
     finally:
         executor.shutdown(wait=True, cancel_futures=True)
     return results
+
+
+def confirm_top_results(
+    results: Sequence[dict[str, Any]],
+    options: TrierOptions,
+    run_test: TestRunner,
+) -> list[dict[str, Any]]:
+    if not results:
+        return []
+    confirmed_count = min(options.top_n, len(results))
+    top_results = [dict(item) for item in results[:confirmed_count]]
+    remaining = [dict(item) for item in results[confirmed_count:]]
+    print(
+        f"Confirming top {confirmed_count} config(s) with test-n={options.test_n}, "
+        f"loss-std-weight={options.loss_std_weight}, min-success-rate={options.min_success_rate}",
+        file=sys.stderr,
+    )
+
+    trials_by_index: dict[int, list[dict[str, Any] | None]] = {index: [result] for index, result in enumerate(top_results)}
+    repeat_jobs: list[tuple[int, list[str], int]] = []
+    for index, result in enumerate(top_results):
+        config = list(result["config"])
+        for trial in range(2, options.test_n + 1):
+            repeat_jobs.append((index, config, trial))
+
+    if options.jobs == 1:
+        for index, config, trial in repeat_jobs:
+            trials_by_index[index].append(run_confirmation_trial(index, confirmed_count, trial, options, config, run_test))
+    else:
+        executor = ThreadPoolExecutor(max_workers=options.jobs)
+        future_to_job = {
+            executor.submit(run_test, config, options.test_urls, options.timeout, options.verbose): (index, trial)
+            for index, config, trial in repeat_jobs
+        }
+        try:
+            for future in as_completed(future_to_job):
+                index, trial = future_to_job[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    print(
+                        f"[confirm {index + 1}/{confirmed_count} trial {trial}/{options.test_n}] "
+                        f"skipped: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+                    result = None
+                print(confirmation_progress_message(index, confirmed_count, trial, options.test_n, result), file=sys.stderr)
+                trials_by_index[index].append(result)
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    for index, result in enumerate(top_results):
+        summarize_confirmation(result, trials_by_index[index], options)
+
+    apply_min_success_rate_penalty(top_results, options)
+    top_results.sort(key=confirmed_sort_key)
+    for item in remaining:
+        item["confirmed"] = False
+    return [*top_results, *remaining]
+
+
+def run_confirmation_trial(
+    index: int,
+    total: int,
+    trial: int,
+    options: TrierOptions,
+    config: Sequence[str],
+    run_test: TestRunner,
+) -> dict[str, Any] | None:
+    try:
+        result = run_test(config, options.test_urls, options.timeout, options.verbose)
+    except Exception as exc:
+        print(f"[confirm {index + 1}/{total} trial {trial}/{options.test_n}] skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
+        result = None
+    print(confirmation_progress_message(index, total, trial, options.test_n, result), file=sys.stderr)
+    return result
+
+
+def confirmation_progress_message(index: int, total: int, trial: int, test_n: int, result: dict[str, Any] | None) -> str:
+    prefix = f"[confirm {index + 1}/{total} trial {trial}/{test_n}]"
+    if result is None:
+        return f"{prefix} fail"
+    return f"{prefix} success {result['best-delay-ms']} ms"
+
+
+def summarize_confirmation(result: dict[str, Any], trials: Sequence[dict[str, Any] | None], options: TrierOptions) -> None:
+    successful = [trial for trial in trials if trial is not None]
+    delays = [float(trial["best-delay-ms"]) for trial in successful]
+    success_count = len(successful)
+    test_count = len(trials)
+    failure_count = test_count - success_count
+    success_rate = success_count / test_count if test_count else 0.0
+    avg_delay = sum(delays) / len(delays) if delays else math.inf
+    std_delay = population_stddev(delays)
+    base_loss = (avg_delay + options.loss_std_weight * std_delay) / success_rate if success_rate > 0 else math.inf
+
+    result["confirmed"] = True
+    result["confirmation-results"] = [confirmation_result_summary(trial) for trial in trials]
+    result["test-count"] = test_count
+    result["success-count"] = success_count
+    result["failure-count"] = failure_count
+    result["success-rate"] = round(success_rate, 3)
+    result["avg-delay-ms"] = round(avg_delay, 3) if math.isfinite(avg_delay) else None
+    result["std-delay-ms"] = round(std_delay, 3) if math.isfinite(std_delay) else None
+    result["base-loss"] = round(base_loss, 3) if math.isfinite(base_loss) else None
+    result["loss"] = result["base-loss"]
+    result["loss-std-weight"] = options.loss_std_weight
+    result["min-success-rate"] = options.min_success_rate
+    if delays:
+        result["best-delay-ms"] = round(min(delays))
+
+
+def confirmation_result_summary(trial: dict[str, Any] | None) -> dict[str, Any]:
+    if trial is None:
+        return {"result": "error"}
+    return {
+        "result": "ok",
+        "best-delay-ms": trial["best-delay-ms"],
+        "tests": trial.get("tests", []),
+    }
+
+
+def population_stddev(values: Sequence[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return math.sqrt(variance)
+
+
+def apply_min_success_rate_penalty(results: Sequence[dict[str, Any]], options: TrierOptions) -> None:
+    usable = [item for item in results if item.get("success-count", 0) > 0]
+    if not usable:
+        return
+    if not any(float(item.get("success-rate", 0)) >= options.min_success_rate for item in usable):
+        return
+    for item in usable:
+        if float(item.get("success-rate", 0)) >= options.min_success_rate:
+            continue
+        base_loss = item.get("base-loss")
+        if base_loss is None:
+            continue
+        item["unselected-penalty"] = 1_000_000
+        item["loss"] = round(float(base_loss) + 1_000_000, 3)
+
+
+def confirmed_sort_key(result: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    loss = float(result["loss"]) if result.get("loss") is not None else math.inf
+    success_rate = float(result.get("success-rate", 0))
+    avg_delay = float(result["avg-delay-ms"]) if result.get("avg-delay-ms") is not None else math.inf
+    std_delay = float(result["std-delay-ms"]) if result.get("std-delay-ms") is not None else math.inf
+    best_delay = float(result.get("best-delay-ms", math.inf))
+    return (loss, -success_rate, avg_delay, std_delay, best_delay)
 
 
 def is_enough_result(result: dict[str, Any], enough_delay_ms: float | None) -> bool:

@@ -464,34 +464,223 @@ def xray_tmux_command(session: str, window: str, config: Sequence[str]) -> list[
     return ["tmux", "new-window", "-t", session, "-n", window, command]
 
 
+def xray_config_tmux_command(session: str, window: str, xray_bin: str, config_path: Path) -> list[str]:
+    command = " ".join(shlex.quote(part) for part in [xray_bin, "run", "-c", str(config_path)])
+    return ["tmux", "new-window", "-t", session, "-n", window, command]
+
+
 def has_listen_args(args: Sequence[str]) -> bool:
     args = normalize_split_url_args(args)
     return any(arg == "-L" or arg.startswith("-L=") for arg in args)
 
 
-def run_xray_in_tmux(session: str, results: Sequence[dict[str, Any]], run_top: int) -> None:
+def run_xray_in_tmux(session: str, results: Sequence[dict[str, Any]], options: TrierOptions) -> None:
     if not results:
         print("No working configs found; skipping tmux launch", file=sys.stderr)
         return
-    launched: list[list[str]] = []
-    for index, result in enumerate(results[:run_top], start=1):
-        config = list(result["config"])
-        if not has_listen_args(config):
-            config = [f"-L=socks5://127.0.0.1:{free_port()}", *config]
-        launched.append(config)
+    run_top = options.run_top
+    selected_results = list(results[:run_top])
+    balanced = len(selected_results) > 1
+    launched = xray_launch_configs(selected_results, balanced=balanced)
+
+    print_xray_selected_results(selected_results, options, balanced=balanced)
+    balanced_config_path: Path | None = None
+    xray_bin: str | None = None
+    if len(launched) > 1:
+        xray_bin = ensure_xray_dependency(verbose=options.verbose)
+        balanced_config = build_balanced_xray_config(launched, options)
+        validate_xray_config(balanced_config, verbose=options.verbose)
+        balanced_config_path = write_temp_xray_config(balanced_config, prefix="xray-trier-balanced-")
 
     try:
         ensure_tmux_session(session)
     except RuntimeError as exc:
         print(f"tmux unavailable: {exc}", file=sys.stderr)
-        processes = [(["xray-run", "exec", *config], [listener_proxy_url(listen) for listen in parse_xray_args(config).listens]) for config in launched]
+        if balanced_config_path is not None and xray_bin is not None:
+            listens = parse_xray_args(launched[0]).listens
+            processes = [([xray_bin, "run", "-c", str(balanced_config_path)], [listener_proxy_url(listen) for listen in listens])]
+        else:
+            processes = [(["xray-run", "exec", *config], [listener_proxy_url(listen) for listen in parse_xray_args(config).listens]) for config in launched]
         run_managed_session(session, processes)
-        print_xray_tmux_launch_info(session, launched, managed=True)
+        print_xray_tmux_launch_info(session, launched[:1] if balanced_config_path is not None else launched, managed=True)
         return
 
-    for index, config in enumerate(launched, start=1):
-        subprocess.run(xray_tmux_command(session, f"xray-{index}", config), check=True)
-    print_xray_tmux_launch_info(session, launched)
+    if balanced_config_path is not None and xray_bin is not None:
+        subprocess.run(xray_config_tmux_command(session, "xray-balanced", xray_bin, balanced_config_path), check=True)
+    else:
+        for index, config in enumerate(launched, start=1):
+            subprocess.run(xray_tmux_command(session, f"xray-{index}", config), check=True)
+    print_xray_tmux_launch_info(session, launched[:1] if balanced_config_path is not None else launched)
+
+
+def xray_launch_configs(results: Sequence[dict[str, Any]], *, balanced: bool) -> list[list[str]]:
+    if not balanced:
+        launched: list[list[str]] = []
+        for result in results:
+            config = list(result["config"])
+            if not has_listen_args(config):
+                config = [f"-L=socks5://127.0.0.1:{free_port()}", *config]
+            launched.append(config)
+        return launched
+
+    first_config = list(results[0]["config"])
+    listen_args = xray_listen_args(first_config)
+    if not listen_args:
+        listen_args = [f"-L=socks5://127.0.0.1:{free_port()}"]
+    return [[*listen_args, *strip_listen_args(result["config"])] for result in results]
+
+
+def xray_listen_args(args: Sequence[str]) -> list[str]:
+    args = normalize_split_url_args(args)
+    listens: list[str] = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            listens.append(f"-L={arg}")
+            skip_next = False
+            continue
+        if arg == "-L":
+            skip_next = True
+        elif arg.startswith("-L="):
+            listens.append(arg)
+    return listens
+
+
+def build_balanced_xray_config(configs: Sequence[Sequence[str]], options: TrierOptions) -> dict[str, Any]:
+    parsed_first = parse_xray_args(configs[0])
+    outbounds: list[dict[str, Any]] = []
+    entry_tags: list[str] = []
+    for candidate_index, config_args in enumerate(configs, start=1):
+        parsed = parse_xray_args(config_args)
+        converted = convert_candidate_forwards(parsed.forwards, verbose=options.verbose)
+        candidate_outbounds: list[dict[str, Any]] = []
+        for converted_outbounds in converted:
+            candidate_outbounds.extend(normalize_outbound(item) for item in converted_outbounds)
+        if not candidate_outbounds:
+            raise ValueError("no Xray outbounds were generated for balancer candidate")
+        for outbound_index, outbound in enumerate(candidate_outbounds, start=1):
+            tag = f"trier-candidate-{candidate_index}-proxy-{outbound_index}"
+            outbound["tag"] = tag
+            if outbound_index < len(candidate_outbounds):
+                outbound["proxySettings"] = {
+                    "tag": f"trier-candidate-{candidate_index}-proxy-{outbound_index + 1}",
+                    "transportLayer": True,
+                }
+            else:
+                outbound.pop("proxySettings", None)
+        entry_tags.append(candidate_outbounds[0]["tag"])
+        outbounds.extend(candidate_outbounds)
+
+    strategy = {"type": options.balancer_strategy or "leastLoad"}
+    if strategy["type"] == "leastLoad":
+        strategy["settings"] = {"expected": 1}
+    config: dict[str, Any] = {
+        "log": {"loglevel": "warning"},
+        "inbounds": [build_inbound(listen, index) for index, listen in enumerate(parsed_first.listens, start=1)],
+        "outbounds": outbounds,
+        "routing": {
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": [inbound_tag(index) for index in range(1, len(parsed_first.listens) + 1)],
+                    "balancerTag": "trier-balancer",
+                }
+            ],
+            "balancers": [
+                {
+                    "tag": "trier-balancer",
+                    "selector": ["trier-candidate-"],
+                    "fallbackTag": entry_tags[0],
+                    "strategy": strategy,
+                }
+            ],
+        },
+    }
+    if strategy["type"] in {"leastPing", "leastLoad"}:
+        config["burstObservatory"] = {
+            "subjectSelector": ["trier-candidate-"],
+            "pingConfig": {
+                "interval": "10s",
+                "sampling": 3,
+                "timeout": f"{min(max(options.timeout, 0.001), 5.0):g}s",
+            },
+        }
+    if options.verbose >= 3:
+        print(f"xray-trier: generated balanced Xray config:\n{dump_json_for_debug(config)}", file=sys.stderr)
+    return config
+
+
+def convert_candidate_forwards(forwards: Sequence[str], *, verbose: int = 0) -> list[list[dict[str, Any]]]:
+    require_single_json_outbound = len(forwards) > 1
+    if len(forwards) == 1:
+        return [
+            convert_forward_to_outbounds(
+                forwards[0],
+                verbose=verbose,
+                require_single_json_outbound=require_single_json_outbound,
+            )
+        ]
+    with ThreadPoolExecutor(max_workers=len(forwards)) as executor:
+        return list(
+            executor.map(
+                lambda forward: convert_forward_to_outbounds(
+                    forward,
+                    verbose=verbose,
+                    require_single_json_outbound=require_single_json_outbound,
+                ),
+                forwards,
+            )
+        )
+
+
+def print_xray_selected_results(results: Sequence[dict[str, Any]], options: TrierOptions, *, balanced: bool) -> None:
+    mode = f"balanced pool strategy={options.balancer_strategy or 'leastLoad'}" if balanced else "single config"
+    print(f"selected xray config(s): {mode}", file=sys.stderr)
+    for index, result in enumerate(results, start=1):
+        print(
+            f"  #{index}: loss={format_metric(result.get('loss'))} "
+            f"avg={format_metric(result.get('avg-delay-ms'))} ms "
+            f"std={format_metric(result.get('std-delay-ms'))} ms "
+            f"success-rate={format_metric(result.get('success-rate'))} "
+            f"success={result.get('success-count', '?')}/{result.get('test-count', '?')} "
+            f"top-n={options.top_n} test-n={options.test_n} run-top={options.run_top}",
+            file=sys.stderr,
+        )
+        for link in xray_config_links(result.get("config", []), verbose=options.verbose):
+            print(f"    link: {link}", file=sys.stderr)
+
+
+def format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def xray_config_links(args: Sequence[str], *, verbose: int = 0) -> list[str]:
+    try:
+        forwards = parse_xray_args(args, auto_listen=False).forwards
+    except Exception:
+        return [" ".join(shlex.quote(part) for part in args)]
+    links: list[str] = []
+    for forward in forwards:
+        links.extend(xray_forward_links(forward, verbose=verbose))
+    return links or [" ".join(shlex.quote(part) for part in args)]
+
+
+def xray_forward_links(forward: str, *, verbose: int = 0) -> list[str]:
+    if not looks_like_json_forward(forward):
+        return [forward]
+    try:
+        command = [*locate_converter(verbose=verbose), forward]
+        completed = run_logged(command, verbose=verbose)
+        if completed.returncode != 0:
+            raise ValueError(completed.stderr.strip() or "converter failed")
+        lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        return lines or [forward]
+    except Exception as exc:
+        return [f"{forward} (link conversion failed: {type(exc).__name__}: {exc})"]
 
 
 def print_xray_tmux_launch_info(session: str, configs: Sequence[Sequence[str]], *, managed: bool = False) -> None:

@@ -44,6 +44,7 @@ from gost_trier.gost import (
 from gost_trier.placeholders import substitute_placeholders
 from gost_trier.xray import (
     XrayArgs,
+    build_balanced_xray_config,
     build_xray_config,
     build_inbound,
     convert_link_to_outbounds,
@@ -61,6 +62,7 @@ from gost_trier.xray import (
     smoke_test_xray,
     validate_xray_config,
     xray_run_main,
+    xray_launch_configs,
     xray_tmux_command,
 )
 from gost_trier.xray_tui import (
@@ -102,6 +104,31 @@ from gost_trier.native import (
 )
 
 
+def trier_options(**overrides):
+    values = {
+        "files": [],
+        "runner_args": ["-F=MAGIC_FILE_1"],
+        "test_urls": ["https://example.com"],
+        "shuffle": False,
+        "timeout": 1,
+        "jobs": 1,
+        "enough_delay_ms": None,
+        "sample": None,
+        "run_in_tmux": None,
+        "run_top": 1,
+        "top_n": 1,
+        "test_n": 1,
+        "loss_std_weight": 0.2,
+        "min_success_rate": 0.7,
+        "balancer_strategy": None,
+        "verbose": 0,
+        "output": "-",
+        "progress": True,
+    }
+    values.update(overrides)
+    return TrierOptions(**values)
+
+
 def test_socks_dependency_is_installed():
     assert socksio.__version__
 
@@ -118,6 +145,11 @@ def test_parse_args_strips_separator_and_defaults():
     assert options.test_urls == ["https://api.ipify.org", "https://myip.wtf/json"]
     assert options.timeout == 20.0
     assert options.jobs == 1
+    assert options.run_top == 5
+    assert options.top_n == 20
+    assert options.test_n == 10
+    assert options.loss_std_weight == 0.2
+    assert options.min_success_rate == 0.7
     assert options.output == "-"
     assert options.progress
 
@@ -141,6 +173,32 @@ def test_parse_trier_args_accepts_custom_default_jobs():
     )
 
     assert options.jobs == 50
+
+
+def test_parse_trier_args_accepts_confirmation_and_balancer_options():
+    options = parse_trier_args(
+        [
+            "--top-n=7",
+            "--test-n=4",
+            "--loss-std-weight=0.5",
+            "--min-success-rate=0.8",
+            "--run-top=3",
+            "--balancer-strategy=leastPing",
+            "trojan.txt",
+            "--",
+            "-F=MAGIC_FILE_1",
+        ],
+        prog="xray-trier",
+        description="test",
+        balancer_strategies=["random", "roundRobin", "leastPing", "leastLoad"],
+    )
+
+    assert options.top_n == 7
+    assert options.test_n == 4
+    assert options.loss_std_weight == 0.5
+    assert options.min_success_rate == 0.8
+    assert options.run_top == 3
+    assert options.balancer_strategy == "leastPing"
 
 
 def test_parse_trier_args_accepts_enough_delay_and_sample():
@@ -278,11 +336,16 @@ def test_gost_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):
     monkeypatch.setattr("gost_trier.gost.ensure_tmux_session", lambda session: (_ for _ in ()).throw(RuntimeError("no tmux")))
     monkeypatch.setattr("gost_trier.gost.run_managed_session", fake_run_managed_session)
 
-    run_gost_in_tmux("fallback", [{"best-delay-ms": 1, "config": ["-L=socks5://127.0.0.1:1080", "-F=x"]}], 1)
+    run_gost_in_tmux(
+        "fallback",
+        [{"best-delay-ms": 1, "config": ["-L=socks5://127.0.0.1:1080", "-F=x"]}],
+        trier_options(run_top=1),
+    )
 
     assert launched == [("fallback", [(["gost", "-L=socks5://127.0.0.1:1080", "-F=x"], ["socks5://127.0.0.1:1080"])])]
     err = capsys.readouterr().err
     assert "runner: managed detached processes" in err
+    assert err.index("selected gost config(s):") < err.index("test gost:")
     assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
 
 
@@ -717,21 +780,7 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
         calls.append(config)
         return {"best-delay-ms": 100, "config": config, "tests": []}
 
-    options = TrierOptions(
-        files=[],
-        runner_args=["-F=MAGIC_FILE_1"],
-        test_urls=["https://example.com"],
-        shuffle=False,
-        timeout=1,
-        jobs=1,
-        enough_delay_ms=200,
-        sample=None,
-        run_in_tmux=None,
-        run_top=1,
-        verbose=2,
-        output="-",
-        progress=True,
-    )
+    options = trier_options(enough_delay_ms=200, verbose=2)
 
     def fake_read_candidate_files(files, shuffle):
         return [["a", "b", "c"]]
@@ -751,21 +800,7 @@ def test_run_trier_stops_when_enough_delay_found(capsys):
 
 def test_run_trier_writes_output_file_and_creates_parent_dirs(tmp_path, capsys):
     output = tmp_path / "nested" / "results.json"
-    options = TrierOptions(
-        files=[],
-        runner_args=["-F=MAGIC_FILE_1"],
-        test_urls=["https://example.com"],
-        shuffle=False,
-        timeout=1,
-        jobs=1,
-        enough_delay_ms=None,
-        sample=None,
-        run_in_tmux=None,
-        run_top=1,
-        verbose=0,
-        output=str(output),
-        progress=True,
-    )
+    options = trier_options(output=str(output))
 
     import gost_trier.common as common
 
@@ -782,26 +817,16 @@ def test_run_trier_writes_output_file_and_creates_parent_dirs(tmp_path, capsys):
         common.read_candidate_files = original
 
     assert capsys.readouterr().out == ""
-    assert output.read_text() == '[\n  {\n    "best-delay-ms": 100,\n    "config": [\n      "a"\n    ],\n    "tests": []\n  }\n]\n'
+    data = json.loads(output.read_text())
+    assert data[0]["best-delay-ms"] == 100
+    assert data[0]["config"] == ["a"]
+    assert data[0]["loss"] == 100.0
+    assert data[0]["confirmed"]
 
 
 def test_run_trier_runs_preflight_before_parallel_workers(capsys):
     events = []
-    options = TrierOptions(
-        files=[],
-        runner_args=["-F=MAGIC_FILE_1"],
-        test_urls=["https://example.com"],
-        shuffle=False,
-        timeout=1,
-        jobs=2,
-        enough_delay_ms=None,
-        sample=None,
-        run_in_tmux=None,
-        run_top=1,
-        verbose=0,
-        output="-",
-        progress=True,
-    )
+    options = trier_options(jobs=2)
 
     import gost_trier.common as common
 
@@ -821,6 +846,48 @@ def test_run_trier_runs_preflight_before_parallel_workers(capsys):
     assert events[0] == ("preflight", 2)
     assert {event[0] for event in events[1:]} == {"worker"}
     assert capsys.readouterr().out == "[]\n"
+
+
+def test_run_trier_confirms_top_configs_and_sorts_by_loss(capsys):
+    options = trier_options(top_n=2, test_n=3, min_success_rate=0.7)
+    calls = {"a": 0, "b": 0}
+    outcomes = {
+        "a": [{"best-delay-ms": 100, "config": ["a"], "tests": []}, {"best-delay-ms": 200, "config": ["a"], "tests": []}, None],
+        "b": [
+            {"best-delay-ms": 150, "config": ["b"], "tests": []},
+            {"best-delay-ms": 130, "config": ["b"], "tests": []},
+            {"best-delay-ms": 170, "config": ["b"], "tests": []},
+        ],
+    }
+
+    def fake_run_test(config, test_urls, timeout, verbose=0):
+        key = config[0]
+        index = calls[key]
+        calls[key] += 1
+        return outcomes[key][index]
+
+    import gost_trier.common as common
+
+    original = common.read_candidate_files
+    common.read_candidate_files = lambda files, shuffle: [["a", "b"]]
+    try:
+        run_trier(
+            options,
+            substitute=lambda args, values: [values[0]],
+            run_test=fake_run_test,
+            run_tmux=lambda session, results, seen_options: None,
+        )
+    finally:
+        common.read_candidate_files = original
+
+    data = json.loads(capsys.readouterr().out)
+    assert [item["config"] for item in data] == [["b"], ["a"]]
+    assert data[0]["success-count"] == 3
+    assert data[0]["failure-count"] == 0
+    assert data[0]["loss"] < 160
+    assert data[1]["success-count"] == 2
+    assert data[1]["unselected-penalty"] == 1_000_000
+    assert data[1]["loss"] > 1_000_000
 
 
 def test_progress_message_prints_success_or_failure_and_delay():
@@ -1055,21 +1122,7 @@ def test_run_xray_test_strips_shell_split_original_listeners(monkeypatch):
 
 def test_preflight_xray_trier_resolves_xray_and_converter(monkeypatch):
     calls = []
-    options = TrierOptions(
-        files=[],
-        runner_args=["-F=MAGIC_FILE_1"],
-        test_urls=["https://example.com"],
-        shuffle=False,
-        timeout=1,
-        jobs=50,
-        enough_delay_ms=None,
-        sample=None,
-        run_in_tmux=None,
-        run_top=1,
-        verbose=3,
-        output="-",
-        progress=True,
-    )
+    options = trier_options(jobs=50, verbose=3)
 
     monkeypatch.setattr("gost_trier.xray.ensure_xray_dependency", lambda verbose=0: calls.append(("xray", verbose)) or "xray")
     monkeypatch.setattr("gost_trier.xray.locate_converter", lambda verbose=0: calls.append(("converter", verbose)) or ["Xray-Link-Json"])
@@ -1306,6 +1359,58 @@ def test_xray_tmux_command_uses_xray_run_exec():
     assert command[6] == "xray-run exec -L=socks5://127.0.0.1:5000 '-F=a b'"
 
 
+def test_xray_launch_configs_uses_one_listener_for_balancer(monkeypatch):
+    monkeypatch.setattr("gost_trier.xray.free_port", lambda: 19090)
+
+    launched = xray_launch_configs(
+        [
+            {"config": ["-F=direct://"]},
+            {"config": ["-F=blackhole://"]},
+        ],
+        balanced=True,
+    )
+
+    assert launched == [
+        ["-L=socks5://127.0.0.1:19090", "-F=direct://"],
+        ["-L=socks5://127.0.0.1:19090", "-F=blackhole://"],
+    ]
+
+
+def test_build_balanced_xray_config_uses_least_load_and_observatory():
+    config = build_balanced_xray_config(
+        [
+            ["-L=socks5://127.0.0.1:1080", "-F=direct://"],
+            ["-L=socks5://127.0.0.1:1080", "-F=blackhole://"],
+        ],
+        trier_options(balancer_strategy="leastLoad", timeout=9),
+    )
+
+    balancer = config["routing"]["balancers"][0]
+    assert config["routing"]["rules"][0]["balancerTag"] == "trier-balancer"
+    assert balancer["selector"] == ["trier-candidate-"]
+    assert balancer["fallbackTag"] == "trier-candidate-1-proxy-1"
+    assert balancer["strategy"] == {"type": "leastLoad", "settings": {"expected": 1}}
+    assert config["burstObservatory"]["subjectSelector"] == ["trier-candidate-"]
+    assert config["burstObservatory"]["pingConfig"]["timeout"] == "5s"
+    assert [outbound["tag"] for outbound in config["outbounds"]] == [
+        "trier-candidate-1-proxy-1",
+        "trier-candidate-2-proxy-1",
+    ]
+
+
+def test_build_balanced_xray_config_omits_observatory_for_round_robin():
+    config = build_balanced_xray_config(
+        [
+            ["-L=socks5://127.0.0.1:1080", "-F=direct://"],
+            ["-L=socks5://127.0.0.1:1080", "-F=blackhole://"],
+        ],
+        trier_options(balancer_strategy="roundRobin"),
+    )
+
+    assert config["routing"]["balancers"][0]["strategy"] == {"type": "roundRobin"}
+    assert "burstObservatory" not in config
+
+
 def test_print_xray_tmux_launch_info_includes_attach_and_curl(capsys):
     print_xray_tmux_launch_info("xray-1080", [["-L=socks5://127.0.0.1:1080", "-L=http://127.0.0.1:2080"]])
 
@@ -1335,7 +1440,11 @@ def test_xray_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):
     monkeypatch.setattr("gost_trier.xray.ensure_tmux_session", lambda session: (_ for _ in ()).throw(RuntimeError("no tmux")))
     monkeypatch.setattr("gost_trier.xray.run_managed_session", fake_run_managed_session)
 
-    run_xray_in_tmux("fallback", [{"best-delay-ms": 1, "config": ["-L=socks5://127.0.0.1:1080", "-F=direct://"]}], 1)
+    run_xray_in_tmux(
+        "fallback",
+        [{"best-delay-ms": 1, "config": ["-L=socks5://127.0.0.1:1080", "-F=direct://"]}],
+        trier_options(run_top=1, balancer_strategy="leastLoad"),
+    )
 
     assert launched == [
         (
@@ -1345,6 +1454,7 @@ def test_xray_run_in_tmux_falls_back_to_managed_session(monkeypatch, capsys):
     ]
     err = capsys.readouterr().err
     assert "runner: managed detached processes" in err
+    assert err.index("selected xray config(s):") < err.index("test xray:")
     assert "curl --proxy socks5h://127.0.0.1:1080 https://api.ipify.org" in err
 
 

@@ -84,7 +84,17 @@ xray-trier -o trier_results.json --timeout=5s --run-in-tmux=xray-1080 'https://r
 
 The results of this investigation are written to `trier_results.json`.
 
+After the initial scan, both triers confirm the fastest successful configs before choosing what to run. By default they retest the top `--top-n=20` configs for `--test-n=10` total trials each, clamped to the number of working configs found. Confirmed configs are sorted by `loss`, which combines average delay, delay standard deviation, and success rate:
+
+```text
+loss = (avg-delay-ms + --loss-std-weight * std-delay-ms) / success-rate
+```
+
+The default `--loss-std-weight` is `0.2`. `--min-success-rate=0.7` is a soft threshold: if at least one confirmed config meets it, configs below it receive a large penalty so they sort after reliable configs; if none meet it, any config with a positive success rate can still be selected.
+
 If tmux is unavailable, `--run-in-tmux` falls back to managed detached processes. Reusing the same session name cleans up previously managed processes for that session before starting new ones.
+
+`--run-top` defaults to `5`. For `xray-trier`, `--run-in-tmux --run-top=1` launches the single lowest-loss config. When `--run-top` is greater than 1, `xray-trier` launches one Xray process with the selected configs in a balancer pool. The default balancer strategy is `--balancer-strategy=leastLoad`; `random`, `roundRobin`, and `leastPing` are also accepted. For `gost-trier`, `--run-top` launches multiple gost processes; fixed `-L` listener ports can conflict in that mode, so omit `-L` if you want free ports assigned automatically.
 
 Sample 100 configs from a larger subscription and stop early if a fast enough config is found:
 
